@@ -1,16 +1,29 @@
 package dev.neoneon.flamingo
 
+import android.content.ClipData
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.delay
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
@@ -38,7 +51,7 @@ import kotlinx.coroutines.launch
 private const val TAG = "GameView"
 
 class GameViewViewModel(
-    private val gameId: String,
+    val gameId: String,
     private val identityStore: PlayerIdentityStore,
 ) : LightViewModel<Unit>() {
     private val board = Board()
@@ -51,6 +64,7 @@ class GameViewViewModel(
         val selectedSquare: Square? = null,
         val legalTargets: Set<Square> = emptySet(),
         val isLoading: Boolean = true,
+        val playerId: String? = null,
     )
 
     private val _state = MutableStateFlow(State(position = board.position))
@@ -69,13 +83,14 @@ class GameViewViewModel(
     // new game has no server record yet, so a failure here just means "start fresh".
     private fun loadExistingGame() {
         viewModelScope.launch(Dispatchers.IO) {
+            val playerId = identityStore.getOrCreate()
             api.fetchGame(gameId).onSuccess { detail ->
                 detail.moves.sortedBy { it.moveNumber }.forEach { replayMove(it) }
                 moveCount = detail.moves.maxOfOrNull { it.moveNumber } ?: 0
             }.onFailure { error ->
                 Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
             }
-            _state.update { it.copy(position = board.position, isLoading = false) }
+            _state.update { it.copy(position = board.position, isLoading = false, playerId = playerId) }
         }
     }
 
@@ -96,19 +111,21 @@ class GameViewViewModel(
         }
     }
 
+    // Kotlin only ever creates games (it's always white) — black is a remote player
+    // now, so local taps can never move for it, regardless of whose turn it is.
     fun onSquareTapped(square: Square) {
         _state.update { current ->
             val selected = current.selectedSquare
 
             when {
-                current.isLoading -> current
+                current.isLoading || current.position.sideToMove != Piece.Color.white -> current
 
                 selected == square -> current.copy(selectedSquare = null, legalTargets = emptySet())
 
                 selected != null && square in current.legalTargets -> {
                     val preMoveFen = board.position.fen
                     val move = board.move(pieceAt = selected, to = square)
-                    if (move != null) submitMove(move, preMoveFen)
+                    if (move != null) submitMove(move, preMoveFen, current.playerId)
                     current.copy(position = board.position, selectedSquare = null, legalTargets = emptySet())
                 }
 
@@ -127,17 +144,12 @@ class GameViewViewModel(
     // The backend stores, for each move, the FEN it was played *from* — not the
     // resulting position — matching the pre-move `fen` the iOS client sends
     // alongside a move over MSMessage (see ChessBoardModel.preMovePosition).
-    private fun submitMove(move: Move, preMoveFen: String) {
+    private fun submitMove(move: Move, preMoveFen: String, playerId: String?) {
         moveCount += 1
         val moveNumber = moveCount
 
         viewModelScope.launch(Dispatchers.IO) {
-            val identity = identityStore.getOrCreate()
-            val callerPlayerId = if (move.piece.color == Piece.Color.white) {
-                identity.whitePlayerId
-            } else {
-                identity.blackPlayerId
-            }
+            val callerPlayerId = playerId ?: identityStore.getOrCreate()
 
             val result = if (moveNumber == 1) {
                 api.createGame(
@@ -146,7 +158,7 @@ class GameViewViewModel(
                     san = move.san,
                     fen = preMoveFen,
                     moveNumber = moveNumber,
-                    whitePlayerId = identity.whitePlayerId,
+                    whitePlayerId = callerPlayerId,
                     callerPlayerId = callerPlayerId,
                 )
             } else {
@@ -157,7 +169,7 @@ class GameViewViewModel(
                     fen = preMoveFen,
                     moveNumber = moveNumber,
                     callerPlayerId = callerPlayerId,
-                    whitePlayerId = identity.whitePlayerId,
+                    whitePlayerId = callerPlayerId,
                 )
             }
 
@@ -187,6 +199,16 @@ class GameView(
     override fun Content() {
         val themeColors by LightThemeController.colors.collectAsState()
         val state by viewModel.state.collectAsState()
+        val clipboard = LocalClipboard.current
+        val coroutineScope = rememberCoroutineScope()
+        var justCopied by remember { mutableStateOf(false) }
+
+        if (justCopied) {
+            LaunchedEffect(Unit) {
+                delay(1500)
+                justCopied = false
+            }
+        }
 
         LightTheme(colors = themeColors) {
             Column(
@@ -201,6 +223,19 @@ class GameView(
                         contentDescription = "Back to games",
                     ),
                     center = LightTopBarCenter.Text("Game"),
+                    rightButton = state.playerId?.let { playerId ->
+                        LightBarButton.Icon(
+                            painter = rememberVectorPainter(if (justCopied) Icons.Default.Check else Icons.Default.Share),
+                            onClick = {
+                                val url = buildInviteUrl(viewModel.gameId, state.position.fen, playerId)
+                                coroutineScope.launch {
+                                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Game invite", url.toString())))
+                                }
+                                justCopied = true
+                            },
+                            contentDescription = "Copy invite link",
+                        )
+                    },
                 )
 
                 Box(
@@ -209,10 +244,11 @@ class GameView(
                         .fillMaxSize(),
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (state.isLoading) {
-                        LightText(text = "Loading…", variant = LightTextVariant.Copy)
-                    } else {
-                        ChessBoard(
+                    when {
+                        state.isLoading -> LightText(text = "Loading…", variant = LightTextVariant.Copy)
+                        state.position.sideToMove != Piece.Color.white ->
+                            LightText(text = "Waiting for opponent…", variant = LightTextVariant.Copy)
+                        else -> ChessBoard(
                             position = state.position,
                             selectedSquare = state.selectedSquare,
                             legalTargets = state.legalTargets,
