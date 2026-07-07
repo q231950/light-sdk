@@ -65,6 +65,9 @@ class GameViewViewModel(
         val legalTargets: Set<Square> = emptySet(),
         val isLoading: Boolean = true,
         val playerId: String? = null,
+        val moveCount: Int = 0,
+        val lastMovePreFen: String? = null,
+        val lastMoveLan: String? = null,
     )
 
     private val _state = MutableStateFlow(State(position = board.position))
@@ -84,13 +87,27 @@ class GameViewViewModel(
     private fun loadExistingGame() {
         viewModelScope.launch(Dispatchers.IO) {
             val playerId = identityStore.getOrCreate()
+            var lastMove: dev.neoneon.flamingo.Move? = null
             api.fetchGame(gameId).onSuccess { detail ->
-                detail.moves.sortedBy { it.moveNumber }.forEach { replayMove(it) }
-                moveCount = detail.moves.maxOfOrNull { it.moveNumber } ?: 0
+                val sorted = detail.moves.sortedBy { it.moveNumber }
+                sorted.forEach { replayMove(it) }
+                lastMove = sorted.lastOrNull()
+                moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
             }.onFailure { error ->
                 Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
             }
-            _state.update { it.copy(position = board.position, isLoading = false, playerId = playerId) }
+            _state.update {
+                it.copy(
+                    position = board.position,
+                    isLoading = false,
+                    playerId = playerId,
+                    moveCount = moveCount,
+                    // fenAfter is misleadingly named — it's the fen the move was played
+                    // *from*, matching the pre-move `fen` this backend always stores.
+                    lastMovePreFen = lastMove?.fenAfter,
+                    lastMoveLan = lastMove?.lan,
+                )
+            }
         }
     }
 
@@ -126,7 +143,14 @@ class GameViewViewModel(
                     val preMoveFen = board.position.fen
                     val move = board.move(pieceAt = selected, to = square)
                     if (move != null) submitMove(move, preMoveFen, current.playerId)
-                    current.copy(position = board.position, selectedSquare = null, legalTargets = emptySet())
+                    current.copy(
+                        position = board.position,
+                        selectedSquare = null,
+                        legalTargets = emptySet(),
+                        moveCount = moveCount,
+                        lastMovePreFen = if (move != null) preMoveFen else current.lastMovePreFen,
+                        lastMoveLan = move?.lan ?: current.lastMoveLan,
+                    )
                 }
 
                 current.position.piece(at = square)?.color == current.position.sideToMove -> {
@@ -185,6 +209,14 @@ class GameViewViewModel(
     }
 }
 
+// (playerId, preMoveFen, lan) for the invite URL, or null until there's a move to share.
+private fun shareParams(state: GameViewViewModel.State): Triple<String, String, String>? {
+    val playerId = state.playerId ?: return null
+    val preMoveFen = state.lastMovePreFen ?: return null
+    val lan = state.lastMoveLan ?: return null
+    return Triple(playerId, preMoveFen, lan)
+}
+
 class GameView(
     sealedActivity: SealedLightActivity,
     private val gameId: String,
@@ -223,11 +255,14 @@ class GameView(
                         contentDescription = "Back to games",
                     ),
                     center = LightTopBarCenter.Text("Game"),
-                    rightButton = state.playerId?.let { playerId ->
+                    // Sharing before white's first move would invite black into a game
+                    // with no move to apply — same rule as the iMessage send button
+                    // (CLAUDE.md: sendButtonIsDisabled is driven by lastMoveLAN != nil).
+                    rightButton = shareParams(state)?.let { (playerId, preMoveFen, lan) ->
                         LightBarButton.Icon(
                             painter = rememberVectorPainter(if (justCopied) Icons.Default.Check else Icons.Default.Share),
                             onClick = {
-                                val url = buildInviteUrl(viewModel.gameId, state.position.fen, playerId)
+                                val url = buildInviteUrl(viewModel.gameId, preMoveFen, lan, playerId)
                                 coroutineScope.launch {
                                     clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Game invite", url.toString())))
                                 }
