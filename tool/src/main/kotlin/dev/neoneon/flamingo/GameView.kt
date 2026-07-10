@@ -54,8 +54,9 @@ class GameViewViewModel(
     val gameId: String,
     private val identityStore: PlayerIdentityStore,
 ) : LightViewModel<Unit>() {
-    private val board = Board()
+    private var board = Board()
     private val api = FlamingoApi()
+    private val transport: LiveTransport = KtorLiveTransport(viewModelScope)
     private var moveCount = 0
     private var hasLoadedInitialState = false
 
@@ -77,37 +78,111 @@ class GameViewViewModel(
         super.onScreenShow(screen)
         if (!hasLoadedInitialState) {
             hasLoadedInitialState = true
-            loadExistingGame()
+            observeLiveEvents()
+            // Connect first so the socket is live before taps are enabled (the board stays
+            // in its "Loading…" state, which blocks taps, until loadExistingGame finishes) —
+            // this guarantees even white's first move goes out over the socket.
+            viewModelScope.launch(Dispatchers.IO) {
+                connect()
+                loadExistingGame()
+            }
+        } else {
+            // Returning to foreground: if we were waiting for the opponent, a move may have
+            // landed while we were backgrounded — re-sync before reconnecting the socket.
+            viewModelScope.launch(Dispatchers.IO) {
+                if (isWaitingForOpponent()) loadExistingGame()
+                connect()
+            }
         }
+    }
+
+    override fun onAppPause() {
+        super.onAppPause()
+        // Drop the live connection while backgrounded; it's re-established on the next show.
+        viewModelScope.launch { transport.disconnect() }
     }
 
     // Loads and replays this game's recorded moves so resuming an in-progress game
     // continues from its real current position instead of the initial one. A brand
     // new game has no server record yet, so a failure here just means "start fresh".
-    private fun loadExistingGame() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val playerId = identityStore.getOrCreate()
-            var lastMove: dev.neoneon.flamingo.Move? = null
-            api.fetchGame(gameId).onSuccess { detail ->
-                val sorted = detail.moves.sortedBy { it.moveNumber }
-                sorted.forEach { replayMove(it) }
-                lastMove = sorted.lastOrNull()
-                moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
-            }.onFailure { error ->
-                Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
+    // Safe to call again (foreground re-sync): the board is rebuilt from scratch.
+    private suspend fun loadExistingGame() {
+        val playerId = identityStore.getOrCreate()
+        var lastMove: dev.neoneon.flamingo.Move? = null
+        api.fetchGame(gameId).onSuccess { detail ->
+            val sorted = detail.moves.sortedBy { it.moveNumber }
+            board = Board()
+            sorted.forEach { replayMove(it) }
+            lastMove = sorted.lastOrNull()
+            moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
+        }.onFailure { error ->
+            Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
+        }
+        _state.update {
+            it.copy(
+                position = board.position,
+                isLoading = false,
+                playerId = playerId,
+                moveCount = moveCount,
+                // fenAfter is misleadingly named — it's the fen the move was played
+                // *from*, matching the pre-move `fen` this backend always stores.
+                lastMovePreFen = lastMove?.fenAfter,
+                lastMoveLan = lastMove?.lan,
+            )
+        }
+    }
+
+    private suspend fun connect() {
+        val playerId = _state.value.playerId ?: identityStore.getOrCreate()
+        transport.connect(gameId, playerId)
+    }
+
+    // The Kotlin tool is always white, so "waiting for opponent" is simply "black to move".
+    private fun isWaitingForOpponent(): Boolean =
+        _state.value.position.sideToMove != Piece.Color.white
+
+    // Collects inbound live actions for the lifetime of the screen. Runs on the main
+    // dispatcher, the same context as onSquareTapped, so board mutations stay serialized.
+    private fun observeLiveEvents() {
+        viewModelScope.launch {
+            transport.events.collect { event ->
+                when (event) {
+                    is LiveEvent.Action -> applyIncoming(event.action)
+                    LiveEvent.NeedsResync -> {
+                        // Divergence, or the socket dropped — re-sync from the server, then
+                        // reconnect (after a short backoff to avoid hammering a bad connection).
+                        loadExistingGame()
+                        delay(1000)
+                        connect()
+                    }
+                }
             }
-            _state.update {
-                it.copy(
-                    position = board.position,
-                    isLoading = false,
-                    playerId = playerId,
-                    moveCount = moveCount,
-                    // fenAfter is misleadingly named — it's the fen the move was played
-                    // *from*, matching the pre-move `fen` this backend always stores.
-                    lastMovePreFen = lastMove?.fenAfter,
-                    lastMoveLan = lastMove?.lan,
-                )
+        }
+    }
+
+    // Applies the opponent's live move to the board so white sees it appear immediately.
+    // The server never echoes our own moves back, so this only ever runs for black's moves.
+    private fun applyIncoming(action: LiveAction) {
+        if (action.intent != LiveAction.INTENT_MOVE) return
+        val lan = action.lan ?: return
+        if (lan.length < 4) return
+
+        val from = Square(lan.substring(0, 2))
+        val to = Square(lan.substring(2, 4))
+        val move = board.move(pieceAt = from, to = to) ?: return
+        if (lan.length == 5 && board.state is Board.State.promotion) {
+            Piece.Kind.fromRawValue(lan.last().uppercase())?.let { kind ->
+                board.completePromotion(move, kind)
             }
+        }
+        action.n?.let { if (it > moveCount) moveCount = it }
+        _state.update {
+            it.copy(
+                position = board.position,
+                selectedSquare = null,
+                legalTargets = emptySet(),
+                moveCount = moveCount,
+            )
         }
     }
 
@@ -165,46 +240,32 @@ class GameViewViewModel(
         }
     }
 
-    // The backend stores, for each move, the FEN it was played *from* — not the
-    // resulting position — matching the pre-move `fen` the iOS client sends
-    // alongside a move over MSMessage (see ChessBoardModel.preMovePosition).
+    // Sends the local move over the live socket instead of a separate HTTP request.
+    // The server records it (creating the game lazily on move 1, since the tool is
+    // always white) and broadcasts it to the opponent — producing the same game
+    // history as the static HTTP variant. The pre-move `fen` is sent so the server
+    // stores the FEN each move was played *from*, matching the existing protocol.
     private fun submitMove(move: Move, preMoveFen: String, playerId: String?) {
         moveCount += 1
         val moveNumber = moveCount
 
         viewModelScope.launch(Dispatchers.IO) {
             val callerPlayerId = playerId ?: identityStore.getOrCreate()
-
-            val result = if (moveNumber == 1) {
-                api.createGame(
-                    gameId = gameId,
+            transport.send(
+                LiveAction(
+                    intent = LiveAction.INTENT_MOVE,
+                    player = callerPlayerId,
                     lan = move.lan,
-                    san = move.san,
                     fen = preMoveFen,
-                    moveNumber = moveNumber,
-                    whitePlayerId = callerPlayerId,
-                    callerPlayerId = callerPlayerId,
+                    n = moveNumber,
                 )
-            } else {
-                api.recordMove(
-                    gameId = gameId,
-                    lan = move.lan,
-                    san = move.san,
-                    fen = preMoveFen,
-                    moveNumber = moveNumber,
-                    callerPlayerId = callerPlayerId,
-                    whitePlayerId = callerPlayerId,
-                )
-            }
-
-            result.onFailure { error ->
-                Log.e(TAG, "Failed to submit move $moveNumber for game $gameId", error)
-            }
+            )
         }
     }
 
     override fun onCleared() {
         super.onCleared()
+        transport.close()
         api.close()
     }
 }
@@ -279,16 +340,23 @@ class GameView(
                         .fillMaxSize(),
                     contentAlignment = Alignment.Center,
                 ) {
-                    when {
-                        state.isLoading -> LightText(text = "Loading…", variant = LightTextVariant.Copy)
-                        state.position.sideToMove != Piece.Color.white ->
-                            LightText(text = "Waiting for opponent…", variant = LightTextVariant.Copy)
-                        else -> ChessBoard(
-                            position = state.position,
-                            selectedSquare = state.selectedSquare,
-                            legalTargets = state.legalTargets,
-                            onSquareTap = { viewModel.onSquareTapped(it) },
-                        )
+                    if (state.isLoading) {
+                        LightText(text = "Loading…", variant = LightTextVariant.Copy)
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            if (state.position.sideToMove != Piece.Color.white) {
+                                LightText(text = "Waiting for opponent…", variant = LightTextVariant.Copy)
+                            }
+                            // Tapping a square is a no-op while it's not white's turn
+                            // (GameViewViewModel.onSquareTapped guards on sideToMove),
+                            // so the board can stay on screen instead of being swapped for text.
+                            ChessBoard(
+                                position = state.position,
+                                selectedSquare = state.selectedSquare,
+                                legalTargets = state.legalTargets,
+                                onSquareTap = { viewModel.onSquareTapped(it) },
+                            )
+                        }
                     }
                 }
             }
