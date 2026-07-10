@@ -60,6 +60,8 @@ kotlin {
 dependencies {
     implementation(project(":sdk:client"))
     implementation(project(":chesskit"))
+    implementation(libs.compose.material.icons.core)
+    implementation(libs.ktor.client.websockets)
     testImplementation(libs.kotlin.test)
     ksp(libs.androidx.room.compiler)
 }
