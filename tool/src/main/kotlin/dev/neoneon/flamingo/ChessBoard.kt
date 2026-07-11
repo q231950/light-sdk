@@ -21,7 +21,12 @@ import dev.neoneon.chesskit.Square
 private const val BOARD_WIDTH_UNITS = 27f
 private const val SQUARE_SIZE_UNITS = BOARD_WIDTH_UNITS / 8f
 
-/** Interactive chess board rendering a chesskit [Position] with tap-to-select/tap-to-move squares. */
+/**
+ * Interactive chess board rendering a chesskit [Position] with tap-to-select/tap-to-move squares.
+ *
+ * [orientation] is the local player's color: their pieces sit at the bottom, so a black
+ * player sees the board flipped (rank 1 on top, files h→a left-to-right).
+ */
 @Composable
 fun ChessBoard(
     position: Position,
@@ -29,11 +34,18 @@ fun ChessBoard(
     legalTargets: Set<Square>,
     onSquareTap: (Square) -> Unit,
     modifier: Modifier = Modifier,
+    orientation: Piece.Color = Piece.Color.white,
 ) {
+    val ranks = if (orientation == Piece.Color.black) (1..8) else (8 downTo 1)
+    val files = if (orientation == Piece.Color.black) {
+        Square.File.entries.reversed()
+    } else {
+        Square.File.entries
+    }
     Column(modifier = modifier) {
-        for (rankValue in 8 downTo 1) {
+        for (rankValue in ranks) {
             Row {
-                for (file in Square.File.entries) {
+                for (file in files) {
                     val square = Square(file, Square.Rank(rankValue))
                     ChessSquare(
                         piece = position.piece(at = square),
