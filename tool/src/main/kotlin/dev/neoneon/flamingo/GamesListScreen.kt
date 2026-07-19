@@ -6,14 +6,23 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
+import dev.neoneon.chesskit.Piece
 import com.thelightphone.sdk.InitialScreen
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
@@ -31,6 +40,7 @@ import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -83,6 +93,16 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
     override fun Content() {
         val themeColors by LightThemeController.colors.collectAsState()
         val state by viewModel.state.collectAsState()
+        val clipboard = LocalClipboard.current
+        val coroutineScope = rememberCoroutineScope()
+        var inviteError by remember { mutableStateOf<String?>(null) }
+
+        if (inviteError != null) {
+            LaunchedEffect(inviteError) {
+                delay(2000)
+                inviteError = null
+            }
+        }
 
         LightTheme(colors = themeColors) {
             Column(
@@ -92,16 +112,41 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
             ) {
                 LightTopBar(
                     center = LightTopBarCenter.Text("Games"),
+                    // Accept a game a friend shared: parse the invite URL sitting on the
+                    // clipboard and open it as black (the creator is always white).
+                    leftButton = LightBarButton.LightIcon(
+                        icon = LightIcons.DOWNLOAD_ARROW,
+                        onClick = {
+                            coroutineScope.launch {
+                                val raw = clipboard.getClipEntry()
+                                    ?.clipData?.takeIf { it.itemCount > 0 }
+                                    ?.getItemAt(0)?.text?.toString()
+                                val invite = raw?.let { parseInviteUrl(it) }
+                                if (invite != null) {
+                                    navigateTo(screenFactory = {
+                                        GameView(it, invite.gameId, initialColor = Piece.Color.black)
+                                    })
+                                } else {
+                                    inviteError = "No invite link on the clipboard"
+                                }
+                            }
+                        },
+                        contentDescription = "Accept invite",
+                    ),
                     rightButton = LightBarButton.LightIcon(
                         icon = LightIcons.ADD,
                         onClick = {
                             val gameId = UUID.randomUUID().toString()
-                            navigateTo(screenFactory = { GameView(it, gameId) })
+                            navigateTo(screenFactory = {
+                                GameView(it, gameId, initialColor = Piece.Color.white)
+                            })
                         },
                         contentDescription = "New game",
                     ),
                     modifier = Modifier.padding(bottom = 1f.gridUnitsAsDp()),
                 )
+
+                InviteErrorBar(text = inviteError)
 
                 when (val current = state) {
                     is GamesListViewModel.State.Loading -> {
@@ -169,6 +214,30 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                     }
                 }
             }
+        }
+    }
+}
+
+/** Fixed-height strip that surfaces a transient message (e.g. a bad invite paste). */
+private val InviteErrorBarHeight = 24.dp
+
+@Composable
+private fun InviteErrorBar(text: String?) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(InviteErrorBarHeight)
+            .padding(horizontal = 1f.gridUnitsAsDp()),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (text != null) {
+            LightText(
+                text = text,
+                variant = LightTextVariant.Fine,
+                lighten = true,
+                align = TextAlign.Center,
+                maxLines = 1,
+            )
         }
     }
 }

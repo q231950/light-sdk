@@ -9,9 +9,10 @@ import java.util.UUID
 
 private val playerIdKey = stringPreferencesKey("FLAMINGO_PLAYER_ID")
 
-// Superseded by playerIdKey once a real second player can join a game from another
-// device — a locally created game is always white, so this reuses whatever identity
-// an install already had rather than orphaning games it created before this migration.
+// Superseded by playerIdKey now that an install's single identity can play either color
+// (white in games it creates, black in games it accepts by invite). Older installs stored
+// their id under this white-only key back when a locally created game was always white;
+// reuse it so those games aren't orphaned rather than minting a fresh id.
 private val legacyWhitePlayerIdKey = stringPreferencesKey("FLAMINGO_WHITE_PLAYER_ID")
 
 /** Persists a single player ID per tool installation, generating it on first access. */

@@ -58,6 +58,10 @@ private const val TAG = "GameView"
 class GameViewViewModel(
     val gameId: String,
     private val identityStore: PlayerIdentityStore,
+    // The color this device plays. A seed only: it's what "New game" (white) vs.
+    // "Accept invite" (black) opened the screen as, and is overridden by the
+    // server's record once the game is fetched (see loadExistingGame).
+    initialColor: Piece.Color = Piece.Color.white,
 ) : LightViewModel<Unit>() {
     private var board = Board()
     private val api = FlamingoApi()
@@ -67,6 +71,7 @@ class GameViewViewModel(
 
     data class State(
         val position: Position,
+        val localColor: Piece.Color,
         val selectedSquare: Square? = null,
         val legalTargets: Set<Square> = emptySet(),
         val isLoading: Boolean = true,
@@ -76,7 +81,7 @@ class GameViewViewModel(
         val lastMoveLan: String? = null,
     )
 
-    private val _state = MutableStateFlow(State(position = board.position))
+    private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
@@ -114,18 +119,27 @@ class GameViewViewModel(
     private suspend fun loadExistingGame() {
         val playerId = identityStore.getOrCreate()
         var lastMove: dev.neoneon.flamingo.Move? = null
+        // Keep the seeded color until the server tells us otherwise (a brand-new game
+        // has no record yet, so the creator's white seed stands).
+        var resolvedColor = _state.value.localColor
         api.fetchGame(gameId).onSuccess { detail ->
             val sorted = detail.moves.sortedBy { it.moveNumber }
             board = Board()
             sorted.forEach { replayMove(it) }
             lastMove = sorted.lastOrNull()
             moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
+            // The record is authoritative: the creator is always white, so anyone who
+            // isn't the white player is black (including a not-yet-joined invitee,
+            // whose blackPlayerID is still null).
+            resolvedColor =
+                if (playerId == detail.game.whitePlayerID) Piece.Color.white else Piece.Color.black
         }.onFailure { error ->
             Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
         }
         _state.update {
             it.copy(
                 position = board.position,
+                localColor = resolvedColor,
                 isLoading = false,
                 playerId = playerId,
                 moveCount = moveCount,
@@ -142,9 +156,10 @@ class GameViewViewModel(
         transport.connect(gameId, playerId)
     }
 
-    // The Kotlin tool is always white, so "waiting for opponent" is simply "black to move".
+    // Waiting for the opponent means it's not our turn — i.e. the side to move
+    // isn't the color this device plays.
     private fun isWaitingForOpponent(): Boolean =
-        _state.value.position.sideToMove != Piece.Color.white
+        _state.value.position.sideToMove != _state.value.localColor
 
     // Collects inbound live actions for the lifetime of the screen. Runs on the main
     // dispatcher, the same context as onSquareTapped, so board mutations stay serialized.
@@ -165,8 +180,9 @@ class GameViewViewModel(
         }
     }
 
-    // Applies the opponent's live move to the board so white sees it appear immediately.
-    // The server never echoes our own moves back, so this only ever runs for black's moves.
+    // Applies the opponent's live move to the board so we see it appear immediately.
+    // The server never echoes our own moves back, so this only ever runs for the
+    // opponent's moves — whichever color that is.
     private fun applyIncoming(action: LiveAction) {
         if (action.intent != LiveAction.INTENT_MOVE) return
         val lan = action.lan ?: return
@@ -208,14 +224,14 @@ class GameViewViewModel(
         }
     }
 
-    // Kotlin only ever creates games (it's always white) — black is a remote player
-    // now, so local taps can never move for it, regardless of whose turn it is.
+    // Taps only move our own pieces: they're ignored unless it's this device's
+    // color to move, so the opponent's turn can never be played locally.
     fun onSquareTapped(square: Square) {
         _state.update { current ->
             val selected = current.selectedSquare
 
             when {
-                current.isLoading || current.position.sideToMove != Piece.Color.white -> current
+                current.isLoading || current.position.sideToMove != current.localColor -> current
 
                 selected == square -> current.copy(selectedSquare = null, legalTargets = emptySet())
 
@@ -246,10 +262,10 @@ class GameViewViewModel(
     }
 
     // Sends the local move over the live socket instead of a separate HTTP request.
-    // The server records it (creating the game lazily on move 1, since the tool is
-    // always white) and broadcasts it to the opponent — producing the same game
-    // history as the static HTTP variant. The pre-move `fen` is sent so the server
-    // stores the FEN each move was played *from*, matching the existing protocol.
+    // The frame carries only the acting player's id, so it works the same whether we
+    // play white or black: the server records the move (creating the game lazily on
+    // white's move 1) and broadcasts it to the opponent. The pre-move `fen` is sent so
+    // the server stores the FEN each move was played *from*, matching the existing protocol.
     private fun submitMove(move: Move, preMoveFen: String, playerId: String?) {
         moveCount += 1
         val moveNumber = moveCount
@@ -286,12 +302,16 @@ private fun shareParams(state: GameViewViewModel.State): Triple<String, String, 
 class GameView(
     sealedActivity: SealedLightActivity,
     private val gameId: String,
+    // white when created via "New game", black when opened from an accepted invite;
+    // reconciled with the server's record once the game loads.
+    private val initialColor: Piece.Color = Piece.Color.white,
 ) : LightScreen<Unit, GameViewViewModel>(sealedActivity) {
 
     override val viewModelClass: Class<GameViewViewModel>
         get() = GameViewViewModel::class.java
 
-    override fun createViewModel() = GameViewViewModel(gameId, PlayerIdentityStore(lightContext.dataStore))
+    override fun createViewModel() =
+        GameViewViewModel(gameId, PlayerIdentityStore(lightContext.dataStore), initialColor)
 
     @Composable
     override fun Content() {
@@ -345,7 +365,7 @@ class GameView(
                 GameStatusBar(
                     text = when {
                         state.isLoading -> null
-                        state.position.sideToMove != Piece.Color.white -> "Waiting for opponent…"
+                        state.position.sideToMove != state.localColor -> "Waiting for opponent…"
                         else -> null
                     },
                 )
@@ -359,7 +379,7 @@ class GameView(
                     if (state.isLoading) {
                         LightText(text = "Loading…", variant = LightTextVariant.Copy)
                     } else {
-                        // Tapping a square is a no-op while it's not white's turn
+                        // Tapping a square is a no-op while it's not our turn
                         // (GameViewViewModel.onSquareTapped guards on sideToMove),
                         // so the board can stay on screen instead of being swapped for text.
                         ChessBoard(
@@ -367,6 +387,7 @@ class GameView(
                             selectedSquare = state.selectedSquare,
                             legalTargets = state.legalTargets,
                             onSquareTap = { viewModel.onSquareTapped(it) },
+                            orientation = state.localColor,
                         )
                     }
                 }
