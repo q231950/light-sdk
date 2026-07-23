@@ -210,7 +210,7 @@ class GameViewViewModel(
     // Applies a previously recorded move's LAN to [board], completing promotions
     // where needed. Draw-offer/resign log entries carry no LAN and are skipped.
     private fun replayMove(stored: dev.neoneon.flamingo.Move) {
-        val lan = stored.lan
+        val lan = stored.lan ?: return   // draw/resign log entries carry no LAN
         if (lan.length < 4) return
 
         val from = Square(lan.substring(0, 2))

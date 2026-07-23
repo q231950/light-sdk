@@ -23,7 +23,10 @@ val Game.isActive: Boolean get() = status in activeGameStatuses
 @Serializable
 data class Move(
     val moveNumber: Int,
-    val lan: String,
+    // Nullable: draw-offer / draw-accept / draw-decline / resign log entries carry no
+    // chess move, so the server sends `lan: null` for them (MoveDTO.lan is optional).
+    // A non-null type here fails to deserialize any game that contains such an action.
+    val lan: String? = null,
     val fenAfter: String,
     val timestamp: String,
     val id: String,
