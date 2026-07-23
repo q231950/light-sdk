@@ -97,9 +97,66 @@ internal class FlamingoApi {
         response.body()
     }
 
+    /**
+     * Creates an invite game (one seat open, waiting for an opponent) and mints its share
+     * phrase. Exactly one of [whitePlayerId] / [blackPlayerId] is the creator's chosen seat;
+     * the other is left null and filled when someone joins by phrase. No first move is sent —
+     * the game is created empty and the creator plays their opening move later in [GameView].
+     */
+    suspend fun createInvite(
+        whitePlayerId: String?,
+        blackPlayerId: String?,
+    ): Result<InviteResponse> = runCatching {
+        val response = client.post("$BASE_URL/games/invite") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                InviteRequest(
+                    whitePlayerID = whitePlayerId,
+                    blackPlayerID = blackPlayerId,
+                    origin = LIGHT_PHONE_ORIGIN,
+                )
+            )
+        }
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException(inviteErrorMessage(response.status.value))
+        }
+        response.body()
+    }
+
+    /** Joins the invite addressed by [phrase], filling its open seat and activating the game. */
+    suspend fun joinByPhrase(
+        phrase: String,
+        playerId: String,
+    ): Result<JoinResponse> = runCatching {
+        val response = client.post("$BASE_URL/games/join-by-phrase") {
+            contentType(ContentType.Application.Json)
+            setBody(JoinRequest(phrase = phrase, playerID = playerId))
+        }
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException(joinErrorMessage(response.status.value))
+        }
+        response.body()
+    }
+
     fun close() {
         client.close()
     }
+}
+
+private const val LIGHT_PHONE_ORIGIN = "lightPhone"
+
+/** Short, top-bar-friendly messages for the invite/join error statuses (see docs/flamingo-api.md). */
+private fun inviteErrorMessage(status: Int): String = when (status) {
+    503 -> "Too many games — try again"
+    else -> "Couldn't create game ($status)"
+}
+
+private fun joinErrorMessage(status: Int): String = when (status) {
+    400 -> "Not two chess moves"
+    404 -> "No game for that phrase"
+    409 -> "Already joined"
+    410 -> "Invite expired"
+    else -> "Join failed ($status)"
 }
 
 @Serializable
@@ -121,4 +178,20 @@ private data class RecordMoveRequest(
     val moveNumber: Int,
     val callerPlayerID: String,
     val whitePlayerID: String,
+)
+
+// Only the seat the creator chose is non-null; the null seat is left out of the JSON
+// (the Json config's encodeDefaults is off, so a field left at its null default is omitted),
+// which the backend requires — exactly one seat may be set.
+@Serializable
+private data class InviteRequest(
+    val whitePlayerID: String? = null,
+    val blackPlayerID: String? = null,
+    val origin: String,
+)
+
+@Serializable
+private data class JoinRequest(
+    val phrase: String,
+    val playerID: String,
 )
