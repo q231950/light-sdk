@@ -6,7 +6,9 @@ import kotlinx.serialization.Serializable
 data class Game(
     val id: String,
     val fen: String,
-    val whitePlayerID: String,
+    // Nullable: a phrase invite created by a black initiator leaves the white seat open
+    // (server returns null) until a joiner fills it.
+    val whitePlayerID: String? = null,
     val blackPlayerID: String? = null,
     val status: String,
     val createdAt: String,
@@ -36,5 +38,19 @@ data class GameDetail(
 @Serializable
 data class RecordMoveResult(
     val move: Move,
+    val game: Game,
+)
+
+/** Response to `POST /flamingo/games/invite` — the freshly created waiting game plus its share phrase. */
+@Serializable
+data class InviteResponse(
+    val gameID: String,
+    val phrase: String,
+    val expiresAt: String,
+)
+
+/** Response to `POST /flamingo/games/join-by-phrase` — the game after our seat was filled. */
+@Serializable
+data class JoinResponse(
     val game: Game,
 )
