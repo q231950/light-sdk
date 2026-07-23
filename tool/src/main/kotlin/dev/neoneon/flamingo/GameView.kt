@@ -128,11 +128,10 @@ class GameViewViewModel(
             sorted.forEach { replayMove(it) }
             lastMove = sorted.lastOrNull()
             moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
-            // The record is authoritative: the creator is always white, so anyone who
-            // isn't the white player is black (including a not-yet-joined invitee,
-            // whose blackPlayerID is still null).
+            // The record is authoritative: we're white iff we're the white player, else
+            // black (a black creator, or a not-yet-joined invitee whose seat is still open).
             resolvedColor =
-                if (playerId == detail.game.whitePlayerID) Piece.Color.white else Piece.Color.black
+                if (samePlayer(playerId, detail.game.whitePlayerID)) Piece.Color.white else Piece.Color.black
         }.onFailure { error ->
             Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
         }
