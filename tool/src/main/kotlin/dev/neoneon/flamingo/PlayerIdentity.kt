@@ -9,6 +9,17 @@ import java.util.UUID
 
 private val playerIdKey = stringPreferencesKey("FLAMINGO_PLAYER_ID")
 
+/**
+ * True if two player-id strings identify the same player, ignoring case.
+ *
+ * This client mints ids with [UUID.randomUUID] (lowercase), while the server round-trips
+ * them through a Swift `UUID` and echoes them back uppercase. A plain `==` between a local
+ * id and a server-returned white/black player id therefore never matches — which silently
+ * resolved every player's color to black. Compare case-insensitively instead.
+ */
+internal fun samePlayer(a: String?, b: String?): Boolean =
+    a != null && b != null && a.equals(b, ignoreCase = true)
+
 // Superseded by playerIdKey now that an install's single identity can play either color
 // (white in games it creates, black in games it accepts by invite). Older installs stored
 // their id under this white-only key back when a locally created game was always white;
