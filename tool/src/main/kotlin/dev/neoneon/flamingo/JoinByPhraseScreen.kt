@@ -60,7 +60,7 @@ class JoinByPhraseViewModel(
                     // The seat we filled decides our color: we're white only if the record now
                     // names us there, otherwise black (we joined a white creator's open black seat).
                     val color =
-                        if (response.game.whitePlayerID == playerId) Piece.Color.white else Piece.Color.black
+                        if (samePlayer(response.game.whitePlayerID, playerId)) Piece.Color.white else Piece.Color.black
                     _state.value = State.Joined(NewGameDestination(response.game.id, color))
                 },
                 onFailure = { error ->
