@@ -1,30 +1,22 @@
 package dev.neoneon.flamingo
 
-import android.content.ClipData
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
@@ -69,6 +61,14 @@ class GameViewViewModel(
     private var moveCount = 0
     private var hasLoadedInitialState = false
 
+    /** The invite-phrase share overlay's state, layered over the board on demand. */
+    sealed interface Share {
+        data object Hidden : Share
+        data object Loading : Share
+        data class Shown(val phrase: String) : Share
+        data class Error(val message: String) : Share
+    }
+
     data class State(
         val position: Position,
         val localColor: Piece.Color,
@@ -77,9 +77,15 @@ class GameViewViewModel(
         val isLoading: Boolean = true,
         val playerId: String? = null,
         val moveCount: Int = 0,
-        val lastMovePreFen: String? = null,
-        val lastMoveLan: String? = null,
-    )
+        // Seat occupancy from the server record. A null seat means the game is still open for a
+        // friend to join, so it can be shared; both stay null until the first load completes.
+        val whitePlayerId: String? = null,
+        val blackPlayerId: String? = null,
+        val share: Share = Share.Hidden,
+    ) {
+        /** Only a game with an unfilled seat has anyone left to invite. */
+        val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
+    }
 
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
@@ -118,16 +124,19 @@ class GameViewViewModel(
     // Safe to call again (foreground re-sync): the board is rebuilt from scratch.
     private suspend fun loadExistingGame() {
         val playerId = identityStore.getOrCreate()
-        var lastMove: dev.neoneon.flamingo.Move? = null
-        // Keep the seeded color until the server tells us otherwise (a brand-new game
-        // has no record yet, so the creator's white seed stands).
+        // Keep the seeded color / last-known seats until the server tells us otherwise (a
+        // transient fetch failure shouldn't clobber what we already knew, e.g. flip an
+        // already-filled game back to "shareable").
         var resolvedColor = _state.value.localColor
+        var whiteId: String? = _state.value.whitePlayerId
+        var blackId: String? = _state.value.blackPlayerId
         api.fetchGame(gameId).onSuccess { detail ->
             val sorted = detail.moves.sortedBy { it.moveNumber }
             board = Board()
             sorted.forEach { replayMove(it) }
-            lastMove = sorted.lastOrNull()
             moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
+            whiteId = detail.game.whitePlayerID
+            blackId = detail.game.blackPlayerID
             // The record is authoritative: we're white iff we're the white player, else
             // black (a black creator, or a not-yet-joined invitee whose seat is still open).
             resolvedColor =
@@ -142,10 +151,8 @@ class GameViewViewModel(
                 isLoading = false,
                 playerId = playerId,
                 moveCount = moveCount,
-                // fenAfter is misleadingly named — it's the fen the move was played
-                // *from*, matching the pre-move `fen` this backend always stores.
-                lastMovePreFen = lastMove?.fenAfter,
-                lastMoveLan = lastMove?.lan,
+                whitePlayerId = whiteId,
+                blackPlayerId = blackId,
             )
         }
     }
@@ -243,8 +250,6 @@ class GameViewViewModel(
                         selectedSquare = null,
                         legalTargets = emptySet(),
                         moveCount = moveCount,
-                        lastMovePreFen = if (move != null) preMoveFen else current.lastMovePreFen,
-                        lastMoveLan = move?.lan ?: current.lastMoveLan,
                     )
                 }
 
@@ -283,19 +288,29 @@ class GameViewViewModel(
         }
     }
 
+    // Opens the share overlay and fetches the phrase from the server (which re-mints if the
+    // old one expired), so we never persist it locally. Only meaningful while a seat is open.
+    fun openShare() {
+        _state.update { it.copy(share = Share.Loading) }
+        viewModelScope.launch(Dispatchers.IO) {
+            api.shareInvite(gameId).fold(
+                onSuccess = { response -> _state.update { it.copy(share = Share.Shown(response.phrase)) } },
+                onFailure = { error ->
+                    _state.update { it.copy(share = Share.Error(error.message ?: "Couldn't get phrase")) }
+                },
+            )
+        }
+    }
+
+    fun closeShare() {
+        _state.update { it.copy(share = Share.Hidden) }
+    }
+
     override fun onCleared() {
         super.onCleared()
         transport.close()
         api.close()
     }
-}
-
-// (playerId, preMoveFen, lan) for the invite URL, or null until there's a move to share.
-private fun shareParams(state: GameViewViewModel.State): Triple<String, String, String>? {
-    val playerId = state.playerId ?: return null
-    val preMoveFen = state.lastMovePreFen ?: return null
-    val lan = state.lastMoveLan ?: return null
-    return Triple(playerId, preMoveFen, lan)
 }
 
 class GameView(
@@ -316,16 +331,6 @@ class GameView(
     override fun Content() {
         val themeColors by LightThemeController.colors.collectAsState()
         val state by viewModel.state.collectAsState()
-        val clipboard = LocalClipboard.current
-        val coroutineScope = rememberCoroutineScope()
-        var justCopied by remember { mutableStateOf(false) }
-
-        if (justCopied) {
-            LaunchedEffect(Unit) {
-                delay(1500)
-                justCopied = false
-            }
-        }
 
         LightTheme(colors = themeColors) {
             Column(
@@ -333,64 +338,107 @@ class GameView(
                     .fillMaxSize()
                     .background(LightThemeTokens.colors.background),
             ) {
-                LightTopBar(
-                    leftButton = LightBarButton.LightIcon(
-                        icon = LightIcons.BACK,
-                        onClick = { goBack() },
-                        contentDescription = "Back to games",
-                    ),
-                    center = LightTopBarCenter.Text("Game"),
-                    // Sharing before white's first move would invite black into a game
-                    // with no move to apply — same rule as the iMessage send button
-                    // (CLAUDE.md: sendButtonIsDisabled is driven by lastMoveLAN != nil).
-                    rightButton = shareParams(state)?.let { (playerId, preMoveFen, lan) ->
-                        LightBarButton.Icon(
-                            painter = rememberVectorPainter(if (justCopied) Icons.Default.Check else Icons.Default.Share),
-                            onClick = {
-                                val url = buildInviteUrl(viewModel.gameId, preMoveFen, lan, playerId)
-                                coroutineScope.launch {
-                                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Game invite", url.toString())))
-                                }
-                                justCopied = true
-                            },
-                            contentDescription = "Copy invite link",
-                        )
-                    },
-                )
-
-                // Always-visible status strip directly beneath the nav bar. It reserves a
-                // fixed height whether or not it has a message, so surfacing or clearing the
-                // "Waiting for opponent…" text never repositions the board below it.
-                GameStatusBar(
-                    text = when {
-                        state.isLoading -> null
-                        state.position.sideToMove != state.localColor -> "Waiting for opponent…"
-                        else -> null
-                    },
-                )
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (state.isLoading) {
-                        LightText(text = "Loading…", variant = LightTextVariant.Copy)
-                    } else {
-                        // Tapping a square is a no-op while it's not our turn
-                        // (GameViewViewModel.onSquareTapped guards on sideToMove),
-                        // so the board can stay on screen instead of being swapped for text.
-                        ChessBoard(
-                            position = state.position,
-                            selectedSquare = state.selectedSquare,
-                            legalTargets = state.legalTargets,
-                            onSquareTap = { viewModel.onSquareTapped(it) },
-                            orientation = state.localColor,
-                        )
-                    }
+                when (val share = state.share) {
+                    GameViewViewModel.Share.Hidden -> GameContent(state)
+                    else -> SharePane(share = share, onClose = { viewModel.closeShare() })
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun ColumnScope.GameContent(state: GameViewViewModel.State) {
+        LightTopBar(
+            leftButton = LightBarButton.LightIcon(
+                icon = LightIcons.BACK,
+                onClick = { goBack() },
+                contentDescription = "Back to games",
+            ),
+            center = LightTopBarCenter.Text("Game"),
+            // Offer the phrase only while a seat is still open — once both players are in,
+            // there's no one left to invite.
+            rightButton = if (!state.isLoading && state.hasOpenSeat) {
+                LightBarButton.Icon(
+                    painter = rememberVectorPainter(Icons.Default.Share),
+                    onClick = { viewModel.openShare() },
+                    contentDescription = "Share invite phrase",
+                )
+            } else {
+                null
+            },
+        )
+
+        // Always-visible status strip directly beneath the nav bar. It reserves a
+        // fixed height whether or not it has a message, so surfacing or clearing the
+        // "Waiting for opponent…" text never repositions the board below it.
+        GameStatusBar(
+            text = when {
+                state.isLoading -> null
+                state.position.sideToMove != state.localColor -> "Waiting for opponent…"
+                else -> null
+            },
+        )
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (state.isLoading) {
+                LightText(text = "Loading…", variant = LightTextVariant.Copy)
+            } else {
+                // Tapping a square is a no-op while it's not our turn
+                // (GameViewViewModel.onSquareTapped guards on sideToMove),
+                // so the board can stay on screen instead of being swapped for text.
+                ChessBoard(
+                    position = state.position,
+                    selectedSquare = state.selectedSquare,
+                    legalTargets = state.legalTargets,
+                    onSquareTap = { viewModel.onSquareTapped(it) },
+                    orientation = state.localColor,
+                )
+            }
+        }
+    }
+
+    // The share overlay, shown in place of the board while [share] is non-Hidden. Reuses the
+    // same phrase panel as the create flow (see SharePhraseContent).
+    @Composable
+    private fun ColumnScope.SharePane(share: GameViewViewModel.Share, onClose: () -> Unit) {
+        LightTopBar(
+            leftButton = LightBarButton.LightIcon(
+                icon = LightIcons.BACK,
+                onClick = onClose,
+                contentDescription = "Back to game",
+            ),
+            center = LightTopBarCenter.Text("Invite"),
+        )
+        when (share) {
+            GameViewViewModel.Share.Loading -> CenteredMessage("Getting phrase…")
+            is GameViewViewModel.Share.Shown -> SharePhraseContent(
+                phrase = share.phrase,
+                buttonLabel = "BACK TO GAME",
+                onDone = onClose,
+            )
+            is GameViewViewModel.Share.Error -> CenteredMessage(share.message)
+            GameViewViewModel.Share.Hidden -> Unit // never rendered by SharePane
+        }
+    }
+
+    @Composable
+    private fun ColumnScope.CenteredMessage(text: String) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            LightText(
+                text = text,
+                variant = LightTextVariant.Copy,
+                align = TextAlign.Center,
+            )
         }
     }
 }
