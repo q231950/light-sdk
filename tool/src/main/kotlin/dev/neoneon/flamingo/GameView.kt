@@ -9,9 +9,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -22,7 +19,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.style.TextAlign
@@ -344,8 +340,8 @@ class GameView(
                     // with no move to apply — same rule as the iMessage send button
                     // (CLAUDE.md: sendButtonIsDisabled is driven by lastMoveLAN != nil).
                     rightButton = shareParams(state)?.let { (playerId, preMoveFen, lan) ->
-                        LightBarButton.Icon(
-                            painter = rememberVectorPainter(if (justCopied) Icons.Default.Check else Icons.Default.Share),
+                        LightBarButton.LightIcon(
+                            icon = if (justCopied) LightIcons.ACCEPT else LightIcons.SEND,
                             onClick = {
                                 val url = buildInviteUrl(viewModel.gameId, preMoveFen, lan, playerId)
                                 coroutineScope.launch {
