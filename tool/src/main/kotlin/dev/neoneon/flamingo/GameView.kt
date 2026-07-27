@@ -3,19 +3,17 @@ package dev.neoneon.flamingo
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import com.thelightphone.sdk.LightScreen
@@ -345,13 +343,22 @@ class GameView(
 
     @Composable
     private fun ColumnScope.GameContent(state: GameViewViewModel.State) {
+        // It's the opponent's turn whenever the side to move isn't the color this device plays.
+        // Surfaced as a second line in the nav bar rather than a dedicated strip, so it costs no
+        // vertical space of its own (the bar reserves its height regardless).
+        val waiting = !state.isLoading && state.position.sideToMove != state.localColor
+
         LightTopBar(
             leftButton = LightBarButton.LightIcon(
                 icon = LightIcons.BACK,
                 onClick = { goBack() },
                 contentDescription = "Back to games",
             ),
-            center = LightTopBarCenter.Text("Game"),
+            center = if (waiting) {
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
+            } else {
+                LightTopBarCenter.Text("Game")
+            },
             // Offer the phrase only while a seat is still open — once both players are in,
             // there's no one left to invite.
             rightButton = if (!state.isLoading && state.hasOpenSeat) {
@@ -365,25 +372,22 @@ class GameView(
             },
         )
 
-        // Always-visible status strip directly beneath the nav bar. It reserves a
-        // fixed height whether or not it has a message, so surfacing or clearing the
-        // "Waiting for opponent…" text never repositions the board below it.
-        GameStatusBar(
-            text = when {
-                state.isLoading -> null
-                state.position.sideToMove != state.localColor -> "Waiting for opponent…"
-                else -> null
-            },
-        )
-
-        Box(
+        // Size the board to the smaller of the available width/height so the full 8×8 always
+        // fits below the nav bar, whatever the device's proportions — the board no longer
+        // assumes it can be a full-screen-width square. Pin it to the bottom so any slack
+        // falls as flexible breathing room between the board and the nav bar.
+        BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxSize(),
-            contentAlignment = Alignment.Center,
+            contentAlignment = Alignment.BottomCenter,
         ) {
             if (state.isLoading) {
-                LightText(text = "Loading…", variant = LightTextVariant.Copy)
+                LightText(
+                    text = "Loading…",
+                    variant = LightTextVariant.Copy,
+                    modifier = Modifier.align(Alignment.Center),
+                )
             } else {
                 // Tapping a square is a no-op while it's not our turn
                 // (GameViewViewModel.onSquareTapped guards on sideToMove),
@@ -394,6 +398,7 @@ class GameView(
                     legalTargets = state.legalTargets,
                     onSquareTap = { viewModel.onSquareTapped(it) },
                     orientation = state.localColor,
+                    boardSize = minOf(maxWidth, maxHeight),
                 )
             }
         }
@@ -435,35 +440,6 @@ class GameView(
                 text = text,
                 variant = LightTextVariant.Copy,
                 align = TextAlign.Center,
-            )
-        }
-    }
-}
-
-/** Fixed height of the status strip; large enough for one line of [LightTextVariant.Fine]. */
-private val StatusBarHeight = 28.dp
-
-/**
- * A fixed-height strip shown directly beneath the nav bar. It always occupies [StatusBarHeight]
- * so that showing or clearing [text] never shifts the board below it; when [text] is null it
- * renders only the reserved space.
- */
-@Composable
-private fun GameStatusBar(text: String?) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(StatusBarHeight)
-            .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (text != null) {
-            LightText(
-                text = text,
-                variant = LightTextVariant.Fine,
-                lighten = true,
-                align = TextAlign.Center,
-                maxLines = 1,
             )
         }
     }
