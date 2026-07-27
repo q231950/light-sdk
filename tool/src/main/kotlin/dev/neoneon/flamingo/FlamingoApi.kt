@@ -123,6 +123,19 @@ internal class FlamingoApi {
         response.body()
     }
 
+    /**
+     * Re-fetches [gameId]'s share phrase from the server (minting a fresh one there if the
+     * previous one expired), so the game view can re-open the share screen without the client
+     * ever persisting the phrase. Only valid while the game still has an open seat.
+     */
+    suspend fun shareInvite(gameId: String): Result<InviteResponse> = runCatching {
+        val response = client.post("$BASE_URL/games/$gameId/invite")
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException(shareErrorMessage(response.status.value))
+        }
+        response.body()
+    }
+
     /** Joins the invite addressed by [phrase], filling its open seat and activating the game. */
     suspend fun joinByPhrase(
         phrase: String,
@@ -149,6 +162,13 @@ private const val LIGHT_PHONE_ORIGIN = "lightPhone"
 private fun inviteErrorMessage(status: Int): String = when (status) {
     503 -> "Too many games — try again"
     else -> "Couldn't create game ($status)"
+}
+
+private fun shareErrorMessage(status: Int): String = when (status) {
+    404 -> "Game not found"
+    409 -> "Both players joined"
+    503 -> "Try again in a moment"
+    else -> "Couldn't get phrase ($status)"
 }
 
 private fun joinErrorMessage(status: Int): String = when (status) {

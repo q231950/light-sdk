@@ -1,7 +1,6 @@
 package dev.neoneon.flamingo
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -14,7 +13,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
@@ -126,9 +124,10 @@ class CreateGameScreen(sealedActivity: SealedLightActivity) :
 
                     CreateGameViewModel.State.Creating -> CenteredMessage("Creating game…")
 
-                    is CreateGameViewModel.State.Created -> CreatedContent(
+                    is CreateGameViewModel.State.Created -> SharePhraseContent(
                         phrase = current.phrase,
-                        onOk = { goBack(NewGameDestination(current.gameId, current.color)) },
+                        buttonLabel = "OK",
+                        onDone = { goBack(NewGameDestination(current.gameId, current.color)) },
                     )
                 }
             }
@@ -170,45 +169,6 @@ class CreateGameScreen(sealedActivity: SealedLightActivity) :
         LightBottomBar(
             items = listOf(
                 LightBarButton.Text(text = "CREATE", onClick = onCreate),
-            ),
-        )
-    }
-
-    @Composable
-    private fun ColumnScope.CreatedContent(phrase: String, onOk: () -> Unit) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 1f.gridUnitsAsDp()),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            LightText(
-                text = "Share this phrase so a friend can join:",
-                variant = LightTextVariant.Copy,
-                align = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            LightText(
-                text = phrase,
-                variant = LightTextVariant.Heading,
-                align = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 1f.gridUnitsAsDp()),
-            )
-            LightText(
-                text = "They enter it under Join to start the game.",
-                variant = LightTextVariant.Fine,
-                lighten = true,
-                align = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-
-        LightBottomBar(
-            items = listOf(
-                LightBarButton.Text(text = "OK", onClick = onOk),
             ),
         )
     }
