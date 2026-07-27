@@ -9,14 +9,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
@@ -358,8 +355,8 @@ class GameView(
             // Offer the phrase only while a seat is still open — once both players are in,
             // there's no one left to invite.
             rightButton = if (!state.isLoading && state.hasOpenSeat) {
-                LightBarButton.Icon(
-                    painter = rememberVectorPainter(Icons.Default.Share),
+                LightBarButton.LightIcon(
+                    icon = LightIcons.SEND,
                     onClick = { viewModel.openShare() },
                     contentDescription = "Share invite phrase",
                 )
