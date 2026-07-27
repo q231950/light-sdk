@@ -10,22 +10,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
-import com.thelightphone.sdk.ui.gridUnitsAsDp
 import dev.neoneon.chesskit.Piece
 import dev.neoneon.chesskit.Position
 import dev.neoneon.chesskit.Square
-
-private const val BOARD_WIDTH_UNITS = 27f
-private const val SQUARE_SIZE_UNITS = BOARD_WIDTH_UNITS / 8f
 
 /**
  * Interactive chess board rendering a chesskit [Position] with tap-to-select/tap-to-move squares.
  *
  * [orientation] is the local player's color: their pieces sit at the bottom, so a black
  * player sees the board flipped (rank 1 on top, files h→a left-to-right).
+ *
+ * [boardSize] is the full side length of the (square) board; each square is [boardSize] / 8. The
+ * caller sizes it to fit the space actually available (see GameView), so it never overflows the
+ * screen regardless of device proportions.
  */
 @Composable
 fun ChessBoard(
@@ -33,9 +34,11 @@ fun ChessBoard(
     selectedSquare: Square?,
     legalTargets: Set<Square>,
     onSquareTap: (Square) -> Unit,
+    boardSize: Dp,
     modifier: Modifier = Modifier,
     orientation: Piece.Color = Piece.Color.white,
 ) {
+    val squareSize = boardSize / 8
     val ranks = if (orientation == Piece.Color.black) (1..8) else (8 downTo 1)
     val files = if (orientation == Piece.Color.black) {
         Square.File.entries.reversed()
@@ -52,6 +55,7 @@ fun ChessBoard(
                         isDark = square.color == Square.Color.dark,
                         isSelected = square == selectedSquare,
                         isLegalTarget = square in legalTargets,
+                        squareSize = squareSize,
                         onTap = { onSquareTap(square) },
                     )
                 }
@@ -66,6 +70,7 @@ private fun ChessSquare(
     isDark: Boolean,
     isSelected: Boolean,
     isLegalTarget: Boolean,
+    squareSize: Dp,
     onTap: () -> Unit,
 ) {
     val content = LightThemeTokens.colors.content
@@ -78,7 +83,7 @@ private fun ChessSquare(
 
     Box(
         modifier = Modifier
-            .size(SQUARE_SIZE_UNITS.gridUnitsAsDp())
+            .size(squareSize)
             .background(content.copy(alpha = backgroundAlpha))
             .clickable(onClick = onTap),
         contentAlignment = Alignment.Center,
