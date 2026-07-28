@@ -2,12 +2,15 @@ package dev.neoneon.flamingo
 
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -29,6 +32,8 @@ import com.thelightphone.sdk.ui.LightThemeController
 import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
 import dev.neoneon.chesskit.Board
 import dev.neoneon.chesskit.Move
 import dev.neoneon.chesskit.Piece
@@ -64,6 +69,18 @@ class GameViewViewModel(
         data class Error(val message: String) : Share
     }
 
+    /**
+     * A local move that reached the last rank and is waiting for the player to pick a piece.
+     *
+     * Not cancellable: by the time chesskit reports [Board.State.promotion] the pawn has already
+     * been moved onto the last rank, and there's no takeback to undo it with. The move is also
+     * held back from the socket until the choice is made, so the LAN we send carries the piece.
+     */
+    sealed interface Promotion {
+        data object Hidden : Promotion
+        data class Pending(val move: Move, val preMoveFen: String) : Promotion
+    }
+
     data class State(
         val position: Position,
         val localColor: Piece.Color,
@@ -77,6 +94,7 @@ class GameViewViewModel(
         val whitePlayerId: String? = null,
         val blackPlayerId: String? = null,
         val share: Share = Share.Hidden,
+        val promotion: Promotion = Promotion.Hidden,
     ) {
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
@@ -234,17 +252,27 @@ class GameViewViewModel(
             when {
                 current.isLoading || current.position.sideToMove != current.localColor -> current
 
+                // The pending-promotion guard is belt-and-braces: chesskit has already flipped
+                // sideToMove by then, so the check above catches it too.
+                current.promotion !is Promotion.Hidden -> current
+
                 selected == square -> current.copy(selectedSquare = null, legalTargets = emptySet())
 
                 selected != null && square in current.legalTargets -> {
                     val preMoveFen = board.position.fen
                     val move = board.move(pieceAt = selected, to = square)
-                    if (move != null) submitMove(move, preMoveFen, current.playerId)
+                    // A pawn reaching the last rank leaves the board mid-move: hold the move back
+                    // until onPromotionSelected completes it, so its LAN carries the chosen piece.
+                    val pending = move
+                        ?.takeIf { board.state is Board.State.promotion }
+                        ?.let { Promotion.Pending(it, preMoveFen) }
+                    if (move != null && pending == null) submitMove(move, preMoveFen, current.playerId)
                     current.copy(
                         position = board.position,
                         selectedSquare = null,
                         legalTargets = emptySet(),
                         moveCount = moveCount,
+                        promotion = pending ?: Promotion.Hidden,
                     )
                 }
 
@@ -257,6 +285,27 @@ class GameViewViewModel(
 
                 else -> current.copy(selectedSquare = null, legalTargets = emptySet())
             }
+        }
+    }
+
+    // Finishes a promotion the player has now chosen a piece for. Only after this does the move
+    // go out, carrying the five-character LAN (e.g. "e7e8q") that the opponent's applyIncoming
+    // and our own replayMove both expect.
+    fun onPromotionSelected(kind: Piece.Kind) {
+        val current = _state.value
+        val pending = current.promotion as? Promotion.Pending ?: return
+
+        // Completing and sending happen outside `update`, whose lambda can re-run under
+        // contention with the socket coroutine — neither is safe to do twice.
+        val completed = board.completePromotion(pending.move, kind)
+        submitMove(completed, pending.preMoveFen, current.playerId)
+
+        _state.update {
+            it.copy(
+                position = board.position,
+                moveCount = moveCount,
+                promotion = Promotion.Hidden,
+            )
         }
     }
 
@@ -333,9 +382,20 @@ class GameView(
                     .fillMaxSize()
                     .background(LightThemeTokens.colors.background),
             ) {
-                when (val share = state.share) {
-                    GameViewViewModel.Share.Hidden -> GameContent(state)
-                    else -> SharePane(share = share, onClose = { viewModel.closeShare() })
+                val promotion = state.promotion
+                val share = state.share
+                when {
+                    // The promotion pane wins: the board is mid-move until a piece is picked.
+                    promotion is GameViewViewModel.Promotion.Pending -> PromotionPane(
+                        color = promotion.move.piece.color,
+                        square = promotion.move.end,
+                        onSelect = { viewModel.onPromotionSelected(it) },
+                    )
+                    share !is GameViewViewModel.Share.Hidden -> SharePane(
+                        share = share,
+                        onClose = { viewModel.closeShare() },
+                    )
+                    else -> GameContent(state)
                 }
             }
         }
@@ -428,6 +488,30 @@ class GameView(
         }
     }
 
+    // The promotion picker, shown in place of the board while a local move waits on a piece.
+    // There's deliberately no back button: the pawn is already on the last rank and chesskit has
+    // no takeback, so the only way out is to pick one of the four.
+    @Composable
+    private fun ColumnScope.PromotionPane(
+        color: Piece.Color,
+        square: Square,
+        onSelect: (Piece.Kind) -> Unit,
+    ) {
+        LightTopBar(center = LightTopBarCenter.Text("Promote to"))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 1f.gridUnitsAsDp()),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            for (kind in listOf(Piece.Kind.queen, Piece.Kind.rook, Piece.Kind.bishop, Piece.Kind.knight)) {
+                PromotionOption(piece = Piece(kind, color, square), onSelect = { onSelect(kind) })
+            }
+        }
+    }
+
     @Composable
     private fun ColumnScope.CenteredMessage(text: String) {
         Box(
@@ -442,5 +526,29 @@ class GameView(
                 align = TextAlign.Center,
             )
         }
+    }
+}
+
+// One row of the promotion picker. Shaped like CreateGameScreen's ColorOption, but tapping picks
+// immediately rather than arming a confirm button, so there's no selected/unselected marker.
+@Composable
+private fun PromotionOption(piece: Piece, onSelect: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .lightClickable { onSelect() }
+            .padding(vertical = 0.75f.gridUnitsAsDp()),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LightText(
+            // Same colour inversion ChessBoard uses, so the glyphs match the pieces on the board.
+            text = piece.copy(color = piece.color.opposite).graphic,
+            variant = LightTextVariant.Heading,
+        )
+        LightText(
+            text = piece.kind.toString(),
+            variant = LightTextVariant.Copy,
+            modifier = Modifier.padding(start = 1f.gridUnitsAsDp()),
+        )
     }
 }
