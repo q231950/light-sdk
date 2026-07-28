@@ -43,9 +43,16 @@ fun Game.statusLabel(playerId: String?): String = when (status) {
 }
 
 /**
- * Whether the side to move is the color this player holds, or null when that can't be told:
- * no local identity yet, we're not seated in this game, or the FEN carries no side-to-move
- * field. Reads the FEN's second field directly rather than building a Board per list row.
+ * Whether it's this player's move, or null when that can't be told.
+ *
+ * `Game.fen` is the position the last move was played *from*, not the one it produced:
+ * both clients send the pre-move FEN (see GameView.submitMove) into the server's
+ * `fen_after` field, and the recorder copies it onto the game — the iOS companion reads
+ * it back the same way, deriving the mover from this field. So the side to move named in
+ * the FEN is whoever just moved, and the move belongs to the *other* color.
+ *
+ * Reads the FEN's fields directly rather than building a Board per list row. Null when
+ * there's no local identity, we hold neither seat, or the FEN carries no side-to-move.
  */
 private fun Game.isMyTurn(playerId: String?): Boolean? {
     val iAmWhite = when {
@@ -53,12 +60,17 @@ private fun Game.isMyTurn(playerId: String?): Boolean? {
         samePlayer(playerId, blackPlayerID) -> false
         else -> return null
     }
-    val whiteToMove = when (fen.split(' ').getOrNull(1)) {
+    val fields = fen.split(' ')
+    val whiteJustMoved = when (fields.getOrNull(1)) {
         "w" -> true
         "b" -> false
         else -> return null
     }
-    return iAmWhite == whiteToMove
+    // The opening position is the one case the pre-move FEN can't resolve: it looks
+    // identical before white's first move and right after it (that move was played
+    // *from* the opening), and the list payload carries no move count to break the tie.
+    if (whiteJustMoved && fields.getOrNull(5) == "1") return null
+    return iAmWhite != whiteJustMoved
 }
 
 private val camelCaseBoundary = Regex("(?<=[a-z0-9])(?=[A-Z])")
