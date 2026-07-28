@@ -83,4 +83,65 @@ class FlamingoModelsTest {
         // The color predicate used by JoinByPhraseScreen / GameView must resolve white, not black.
         assertTrue(samePlayer(response.game.whitePlayerID, myLowercaseId))
     }
+
+    private fun game(
+        status: String,
+        fen: String = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        whitePlayerID: String? = "W",
+        blackPlayerID: String? = "B",
+    ) = Game(
+        id = "g",
+        fen = fen,
+        whitePlayerID = whitePlayerID,
+        blackPlayerID = blackPlayerID,
+        status = status,
+        createdAt = "x",
+        updatedAt = "y",
+    )
+
+    @Test
+    fun labelsWaitingGameInWords() {
+        assertEquals("waiting for opponent", game("waitingForOpponent").statusLabel("W"))
+    }
+
+    @Test
+    fun labelsActiveGameByWhoseTurnItIs() {
+        val whiteToMove = game("active")
+        assertEquals("your turn", whiteToMove.statusLabel("W"))
+        assertEquals("their turn", whiteToMove.statusLabel("B"))
+
+        val blackToMove = game("active", fen = "rnbqkbnr/8/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1")
+        assertEquals("your turn", blackToMove.statusLabel("B"))
+        assertEquals("their turn", blackToMove.statusLabel("W"))
+    }
+
+    @Test
+    fun matchesSeatsCaseInsensitivelyForTurn() {
+        // The server echoes ids UPPERCASE; the locally stored id is lowercase.
+        val active = game("active", whitePlayerID = "96596872-5FE3-4574-8684-ACA1047AFA23")
+        assertEquals("your turn", active.statusLabel("96596872-5fe3-4574-8684-aca1047afa23"))
+    }
+
+    @Test
+    fun fallsBackToNeutralActiveLabelWhenTurnIsUnknowable() {
+        // No local identity, not seated in the game, and a FEN with no side-to-move field.
+        assertEquals("in progress", game("active").statusLabel(null))
+        assertEquals("in progress", game("active").statusLabel("someone-else"))
+        assertEquals("in progress", game("active", fen = "f").statusLabel("W"))
+    }
+
+    @Test
+    fun labelsFinishedGames() {
+        assertEquals("checkmate", game("checkmate").statusLabel("W"))
+        assertEquals("stalemate", game("stalemate").statusLabel("W"))
+        assertEquals("draw", game("draw").statusLabel("W"))
+        assertEquals("resigned", game("resigned").statusLabel("W"))
+    }
+
+    @Test
+    fun humanizesUnknownStatus() {
+        // A status this build doesn't know about must still read as words, not camelCase.
+        assertEquals("timed out", game("timedOut").statusLabel("W"))
+        assertEquals("abandoned", game("abandoned").statusLabel("W"))
+    }
 }

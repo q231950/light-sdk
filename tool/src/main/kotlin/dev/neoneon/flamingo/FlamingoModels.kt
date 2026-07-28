@@ -20,6 +20,53 @@ private val activeGameStatuses = setOf("active", "waitingForOpponent")
 
 val Game.isActive: Boolean get() = status in activeGameStatuses
 
+/**
+ * The raw backend status rendered for humans — `waitingForOpponent` is no way to talk to
+ * someone. `active` only means "in progress", so it's resolved against [playerId] into whose
+ * move it actually is. The server declares checkmate/stalemate but never writes them today;
+ * they're handled anyway, and anything unrecognized falls back to the split camelCase word.
+ */
+fun Game.statusLabel(playerId: String?): String = when (status) {
+    "waitingForOpponent" -> "waiting for opponent"
+    "active" -> when (isMyTurn(playerId)) {
+        true -> "your turn"
+        false -> "their turn"
+        null -> "in progress"
+    }
+    // Neither the winner of a checkmate nor the resigning player is knowable from a list
+    // entry alone (the resigner lives on the move log), so these stay neutral.
+    "checkmate" -> "checkmate"
+    "stalemate" -> "stalemate"
+    "draw" -> "draw"
+    "resigned" -> "resigned"
+    else -> status.humanized()
+}
+
+/**
+ * Whether the side to move is the color this player holds, or null when that can't be told:
+ * no local identity yet, we're not seated in this game, or the FEN carries no side-to-move
+ * field. Reads the FEN's second field directly rather than building a Board per list row.
+ */
+private fun Game.isMyTurn(playerId: String?): Boolean? {
+    val iAmWhite = when {
+        samePlayer(playerId, whitePlayerID) -> true
+        samePlayer(playerId, blackPlayerID) -> false
+        else -> return null
+    }
+    val whiteToMove = when (fen.split(' ').getOrNull(1)) {
+        "w" -> true
+        "b" -> false
+        else -> return null
+    }
+    return iAmWhite == whiteToMove
+}
+
+private val camelCaseBoundary = Regex("(?<=[a-z0-9])(?=[A-Z])")
+
+/** `timedOut` -> `timed out`, so an unrecognized status still reads as words. */
+private fun String.humanized(): String =
+    split(camelCaseBoundary).joinToString(" ") { it.lowercase() }
+
 @Serializable
 data class Move(
     val moveNumber: Int,
