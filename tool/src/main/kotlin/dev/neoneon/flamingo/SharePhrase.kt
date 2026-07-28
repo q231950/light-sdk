@@ -30,7 +30,7 @@ fun ColumnScope.SharePhraseContent(phrase: String, buttonLabel: String, onDone: 
         verticalArrangement = Arrangement.Center,
     ) {
         LightText(
-            text = "Share this phrase so a friend can join:",
+            text = "Share this code so a friend can join:",
             variant = LightTextVariant.Copy,
             align = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),

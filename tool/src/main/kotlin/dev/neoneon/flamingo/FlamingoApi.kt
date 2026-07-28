@@ -168,12 +168,12 @@ private fun shareErrorMessage(status: Int): String = when (status) {
     404 -> "Game not found"
     409 -> "Both players joined"
     503 -> "Try again in a moment"
-    else -> "Couldn't get phrase ($status)"
+    else -> "Couldn't get code ($status)"
 }
 
 private fun joinErrorMessage(status: Int): String = when (status) {
-    400 -> "Not two chess moves"
-    404 -> "No game for that phrase"
+    400 -> "Enter a valid 5-letter code"
+    404 -> "No game for that code"
     409 -> "Already joined"
     410 -> "Invite expired"
     else -> "Join failed ($status)"

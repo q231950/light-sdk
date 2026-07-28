@@ -291,7 +291,7 @@ class GameViewViewModel(
             api.shareInvite(gameId).fold(
                 onSuccess = { response -> _state.update { it.copy(share = Share.Shown(response.phrase)) } },
                 onFailure = { error ->
-                    _state.update { it.copy(share = Share.Error(error.message ?: "Couldn't get phrase")) }
+                    _state.update { it.copy(share = Share.Error(error.message ?: "Couldn't get code")) }
                 },
             )
         }
@@ -365,7 +365,7 @@ class GameView(
                 LightBarButton.LightIcon(
                     icon = LightIcons.SEND,
                     onClick = { viewModel.openShare() },
-                    contentDescription = "Share invite phrase",
+                    contentDescription = "Share invite code",
                 )
             } else {
                 null
@@ -417,7 +417,7 @@ class GameView(
             center = LightTopBarCenter.Text("Invite"),
         )
         when (share) {
-            GameViewViewModel.Share.Loading -> CenteredMessage("Getting phrase…")
+            GameViewViewModel.Share.Loading -> CenteredMessage("Getting code…")
             is GameViewViewModel.Share.Shown -> SharePhraseContent(
                 phrase = share.phrase,
                 buttonLabel = "BACK TO GAME",
