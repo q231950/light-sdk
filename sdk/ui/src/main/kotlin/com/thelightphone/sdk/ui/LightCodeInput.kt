@@ -11,13 +11,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.input.TextFieldState
-import androidx.compose.foundation.text.input.delete
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextRange
@@ -28,26 +29,45 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.thelightphone.lp3Keyboard.ui.*
 import com.thelightphone.sdk.ui.keyboard.LightEmbeddedLp3Keyboard
+import com.thelightphone.sdk.ui.keyboard.TextInputKeyboardCallback
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.drop
 
 private const val UNDERLINE_THICKNESS_PX = 3f
 private const val ACTIVE_UNDERLINE_THICKNESS_PX = 7f
 private const val GLYPH_TO_UNDERLINE_GAP_GRID_UNITS = 0.5f
-private const val BOX_INNER_PADDING_GRID_UNITS = 0.5f
 private const val BOX_GAP_GRID_UNITS = 1f
 
 /**
- * OTP-style fixed-length code entry: one underlined box per character, backed by an
- * embedded LP3 keyboard. Convenience overload that builds the keyboard view-model for you;
- * pass a [keyboardOptionsFlow] from `rememberKeyboardOptions()`.
+ * Default normalization for a letter code: uppercase, keep only ASCII letters (dropping digits,
+ * punctuation, whitespace, emoji), and cap at [length]. Matches the iOS `InviteCode.normalize`,
+ * so a code read off any screen normalizes identically on both platforms.
+ */
+fun normalizeLetterCode(raw: String, length: Int): String =
+    buildString {
+        for (character in raw) {
+            if (this.length >= length) break
+            if (character in 'A'..'Z') append(character)
+            else if (character in 'a'..'z') append(character - 32)
+        }
+    }
+
+/**
+ * OTP-style fixed-length code entry: one underlined box per character, backed by an embedded
+ * LP3 keyboard. Convenience overload that builds the keyboard view-model for you; pass a
+ * [keyboardOptionsFlow] from `rememberKeyboardOptions()`.
  *
- * Behaviour (linear fill + backspace):
- * - Each ASCII letter fills the next empty box (uppercased); non-letters are ignored.
- * - Backspace clears the last filled box and steps back; long-press Backspace clears all.
- * - [onComplete] fires once, the moment the final box fills (for auto-submit). [onSubmit]
- *   is the explicit action (bottom-bar button / Return) and may fire on a partial code —
- *   the caller decides whether a short code is acceptable.
+ * Editing follows the platform's normal text model (the same [TextInputKeyboardCallback] the
+ * full-screen editor uses): keys insert, Backspace deletes, Return submits. A reactive
+ * normalization pass then keeps [state] to [normalize]'s shape — for the default that means
+ * uppercase ASCII letters, non-letters dropped, capped at [length] — and the boxes simply
+ * mirror the result. This is the Compose analog of the iOS `CodeInputView`.
+ *
+ * [onComplete] fires once, the moment the code first reaches [length] characters (for
+ * auto-submit); it does not fire for a code that is already full when the field appears.
+ * [onSubmit] is the explicit action (bottom-bar button / Return) and may fire on a partial
+ * code — the caller decides whether a short code is acceptable.
  */
 @Composable
 fun LightCodeInput(
@@ -60,15 +80,14 @@ fun LightCodeInput(
     modifier: Modifier = Modifier,
     submitLabel: String = "SUBMIT",
     onComplete: ((CharSequence) -> Unit)? = null,
+    normalize: (String) -> String = { normalizeLetterCode(it, length) },
     editorKey: Any = title,
 ) {
     val currentOnSubmit by rememberUpdatedState(onSubmit)
-    val currentOnComplete by rememberUpdatedState(onComplete)
-    val keyboardCallback = remember(state, length) {
-        CodeKeyboardCallback(
+    val keyboardCallback = remember(state) {
+        TextInputKeyboardCallback(
             state = state,
-            length = length,
-            onComplete = { currentOnComplete?.invoke(it) },
+            singleLine = true,
             onReturn = { currentOnSubmit(state.text) },
         )
     }
@@ -87,12 +106,14 @@ fun LightCodeInput(
         viewModel = keyboardViewModel,
         modifier = modifier,
         submitLabel = submitLabel,
+        onComplete = onComplete,
+        normalize = normalize,
     )
 }
 
 /**
- * Full-screen code entry: top bar, a centered row of [length] underlined character boxes,
- * the embedded LP3 keyboard, and a [LightBottomBar] submit button.
+ * Full-screen code entry: top bar, a centered row of [length] underlined character boxes, the
+ * embedded LP3 keyboard, and a [LightBottomBar] submit button.
  */
 @Composable
 fun LightCodeInput(
@@ -104,7 +125,33 @@ fun LightCodeInput(
     viewModel: Lp3KeyboardViewModel,
     modifier: Modifier = Modifier,
     submitLabel: String = "SUBMIT",
+    onComplete: ((CharSequence) -> Unit)? = null,
+    normalize: (String) -> String = { normalizeLetterCode(it, length) },
 ) {
+    val currentOnComplete by rememberUpdatedState(onComplete)
+
+    // Mirror the iOS `CodeInputView.onChange`: normalize the field's text, and once it settles
+    // at full length fire onComplete exactly once. `drop(1)` skips the initial value so a code
+    // preserved across a failed attempt doesn't auto-resubmit when the field reappears.
+    LaunchedEffect(state, length) {
+        snapshotFlow { state.text.toString() }
+            .drop(1)
+            .collect { raw ->
+                val normalized = normalize(raw)
+                if (normalized != raw) {
+                    val current = state.text.length
+                    state.edit {
+                        replace(0, current, normalized)
+                        selection = TextRange(normalized.length)
+                    }
+                    // The reassignment re-fires snapshotFlow; onComplete is handled on that
+                    // settled pass (normalized == raw) so it fires exactly once.
+                } else if (normalized.length == length) {
+                    currentOnComplete?.invoke(normalized)
+                }
+            }
+    }
+
     Surface {
         Column(modifier = modifier.fillMaxSize()) {
             LightTopBar(
@@ -137,27 +184,33 @@ fun LightCodeInput(
     }
 }
 
-/** The row of underlined character boxes. The next empty box carries a thicker underline. */
+/**
+ * The row of underlined character boxes. Every box gets an equal share of the width (like the
+ * iOS `CodeInputView`'s `.frame(maxWidth: .infinity)`), so the glyphs stay evenly spaced across
+ * the screen regardless of how many are filled. The next empty box carries a thicker underline.
+ */
 @Composable
 private fun CodeBoxes(text: String, length: Int) {
     val colors = LightThemeTokens.colors
-    Row(horizontalArrangement = Arrangement.spacedBy(BOX_GAP_GRID_UNITS.gridUnitsAsDp())) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(BOX_GAP_GRID_UNITS.gridUnitsAsDp()),
+    ) {
         for (index in 0 until length) {
             val glyph = if (index < text.length) text[index].toString() else null
             // The active box is the first empty one; once full, nothing is active.
             val isActive = index == text.length && text.length < length
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                    modifier = Modifier.padding(horizontal = BOX_INNER_PADDING_GRID_UNITS.gridUnitsAsDp()),
-                ) {
-                    // A blank slot renders a space so every box has the same monospace advance width.
-                    LightText(
-                        text = glyph ?: " ",
-                        variant = LightTextVariant.Heading,
-                        monospace = true,
-                        align = TextAlign.Center,
-                    )
-                }
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // A blank slot renders a space so every box keeps the same height when empty.
+                LightText(
+                    text = glyph ?: " ",
+                    variant = LightTextVariant.Heading,
+                    monospace = true,
+                    align = TextAlign.Center,
+                )
                 Spacer(modifier = Modifier.height(GLYPH_TO_UNDERLINE_GAP_GRID_UNITS.gridUnitsAsDp()))
                 Spacer(
                     modifier = Modifier
@@ -170,81 +223,6 @@ private fun CodeBoxes(text: String, length: Int) {
                 )
             }
         }
-    }
-}
-
-/**
- * Keyboard callback enforcing the linear fill + backspace behaviour for a fixed-length code.
- * Only ASCII letters are accepted (uppercased); everything else — digits, symbols, space,
- * emoji — is ignored. Held-letter repeats are dropped so one key can't run the row full.
- */
-private class CodeKeyboardCallback(
-    private val state: TextFieldState,
-    private val length: Int,
-    private val onComplete: (CharSequence) -> Unit,
-    private val onReturn: () -> Unit,
-) : Lp3RepeatableKeyboardCallback {
-
-    override fun onKeyPressed(code: Int) = Unit
-    override fun onSpecialKeyPressed(specialKey: SpecialKey) = Unit
-
-    override fun onKeyReleased(code: Int) = appendLetter(code)
-
-    // Ignore held-letter repeats: a leaned-on key must not fill the remaining boxes.
-    override fun onKeyRepeated(code: Int) = Unit
-
-    override fun onSpecialKeyReleased(specialKey: SpecialKey) {
-        when (specialKey) {
-            SpecialKey.Backspace -> deleteLast()
-            SpecialKey.Return -> onReturn()
-            else -> Unit
-        }
-    }
-
-    override fun onSpecialKeyRepeated(specialKey: SpecialKey) {
-        if (specialKey == SpecialKey.Backspace) deleteLast()
-    }
-
-    override fun onKeyLongPressed(code: Int) = Unit
-
-    override fun onSpecialKeyLongPressed(specialKey: SpecialKey) {
-        if (specialKey == SpecialKey.Backspace) clearAll()
-    }
-
-    private fun appendLetter(code: Int) {
-        val end = state.text.length
-        if (end >= length) return
-        val upper = asciiLetterUppercased(code) ?: return
-        state.edit {
-            replace(end, end, upper.toString())
-            selection = TextRange(end + 1)
-        }
-        if (state.text.length == length) onComplete(state.text)
-    }
-
-    private fun deleteLast() {
-        val end = state.text.length
-        if (end == 0) return
-        state.edit {
-            delete(end - 1, end)
-            selection = TextRange(end - 1)
-        }
-    }
-
-    private fun clearAll() {
-        val end = state.text.length
-        if (end == 0) return
-        state.edit {
-            delete(0, end)
-            selection = TextRange(0)
-        }
-    }
-
-    /** `A–Z`/`a–z` code point → uppercase `Char`; anything else → null. */
-    private fun asciiLetterUppercased(code: Int): Char? = when (code) {
-        in 'A'.code..'Z'.code -> code.toChar()
-        in 'a'.code..'z'.code -> (code - 32).toChar()
-        else -> null
     }
 }
 
