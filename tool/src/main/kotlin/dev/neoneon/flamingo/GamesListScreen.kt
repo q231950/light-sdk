@@ -20,6 +20,7 @@ import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
@@ -99,38 +100,23 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
             ) {
                 LightTopBar(
                     center = LightTopBarCenter.Text("Games"),
-                    // Join a game a friend created by entering the invite code they shared.
-                    leftButton = LightBarButton.LightIcon(
-                        icon = LightIcons.DOWNLOAD_ARROW,
-                        onClick = {
-                            navigateTo(
-                                screenFactory = { JoinByPhraseScreen(it) },
-                                resultCallback = { destination -> openGame(destination) },
-                            )
-                        },
-                        contentDescription = "Join by code",
-                    ),
-                    // Create a game: choose a color, then share the minted code.
-                    rightButton = LightBarButton.LightIcon(
-                        icon = LightIcons.ADD,
-                        onClick = {
-                            navigateTo(
-                                screenFactory = { CreateGameScreen(it) },
-                                resultCallback = { destination -> openGame(destination) },
-                            )
-                        },
-                        contentDescription = "New game",
-                    ),
                     modifier = Modifier.padding(bottom = 1f.gridUnitsAsDp()),
                 )
 
                 when (val current = state) {
                     is GamesListViewModel.State.Loading -> {
-                        LightText(
-                            text = "Loading…",
-                            variant = LightTextVariant.Copy,
-                            modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp()),
-                        )
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LightText(
+                                text = "Loading…",
+                                variant = LightTextVariant.Copy,
+                                modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp()),
+                            )
+                        }
                     }
 
                     is GamesListViewModel.State.Error -> {
@@ -189,6 +175,38 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                         }
                     }
                 }
+
+                LightBottomBar(
+                    items = listOf(
+                        // Info: read-only Terms of Service and Privacy Policy.
+                        LightBarButton.LightIcon(
+                            icon = LightIcons.ELLIPSES,
+                            onClick = { navigateTo(screenFactory = { InfoScreen(it) }) },
+                            contentDescription = "Info",
+                        ),
+                        // Join a game a friend created by entering the invite code they shared.
+                        LightBarButton.Text(
+                            text = "JOIN",
+                            onClick = {
+                                navigateTo(
+                                    screenFactory = { JoinByPhraseScreen(it) },
+                                    resultCallback = { destination -> openGame(destination) },
+                                )
+                            },
+                        ),
+                        // Create a game: choose a color, then share the minted code.
+                        LightBarButton.LightIcon(
+                            icon = LightIcons.ADD,
+                            onClick = {
+                                navigateTo(
+                                    screenFactory = { CreateGameScreen(it) },
+                                    resultCallback = { destination -> openGame(destination) },
+                                )
+                            },
+                            contentDescription = "New game",
+                        ),
+                    ),
+                )
             }
         }
     }
