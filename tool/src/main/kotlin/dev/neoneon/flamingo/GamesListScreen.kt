@@ -99,7 +99,7 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
             ) {
                 LightTopBar(
                     center = LightTopBarCenter.Text("Games"),
-                    // Join a game a friend created by entering the invite phrase they shared.
+                    // Join a game a friend created by entering the invite code they shared.
                     leftButton = LightBarButton.LightIcon(
                         icon = LightIcons.DOWNLOAD_ARROW,
                         onClick = {
@@ -108,9 +108,9 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                                 resultCallback = { destination -> openGame(destination) },
                             )
                         },
-                        contentDescription = "Join by phrase",
+                        contentDescription = "Join by code",
                     ),
-                    // Create a game: choose a color, then share the minted phrase.
+                    // Create a game: choose a color, then share the minted code.
                     rightButton = LightBarButton.LightIcon(
                         icon = LightIcons.ADD,
                         onClick = {

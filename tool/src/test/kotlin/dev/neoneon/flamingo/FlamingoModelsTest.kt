@@ -60,12 +60,12 @@ class FlamingoModelsTest {
 
     @Test
     fun decodesInviteResponse() {
-        val body = """{"gameID":"2A787C32","phrase":"rook b2 b7, knight g1 f3","expiresAt":"2026-07-30T14:13:39Z"}"""
+        val body = """{"gameID":"2A787C32","phrase":"ADKRF","expiresAt":"2026-07-30T14:13:39Z"}"""
 
         val response = json.decodeFromString<InviteResponse>(body)
 
         assertEquals("2A787C32", response.gameID)
-        assertEquals("rook b2 b7, knight g1 f3", response.phrase)
+        assertEquals("ADKRF", response.phrase)
         assertEquals("2026-07-30T14:13:39Z", response.expiresAt)
     }
 

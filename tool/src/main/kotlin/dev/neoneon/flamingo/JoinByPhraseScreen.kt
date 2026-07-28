@@ -15,8 +15,8 @@ import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.rememberKeyboardOptions
+import com.thelightphone.sdk.ui.LightCodeInput
 import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextInputEditor
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightTheme
 import com.thelightphone.sdk.ui.LightThemeController
@@ -26,6 +26,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+
+/** Invite codes are five letters (see the server's `InviteCode`). */
+private const val CODE_LENGTH = 5
 
 class JoinByPhraseViewModel(
     private val identityStore: PlayerIdentityStore,
@@ -48,8 +51,8 @@ class JoinByPhraseViewModel(
 
     fun join(phrase: String) {
         val trimmed = phrase.trim()
-        if (trimmed.isEmpty()) {
-            _state.value = State.Input("Enter a phrase")
+        if (trimmed.length != CODE_LENGTH) {
+            _state.value = State.Input("Enter the 5-letter code")
             return
         }
         _state.value = State.Joining
@@ -98,14 +101,17 @@ class JoinByPhraseScreen(sealedActivity: SealedLightActivity) :
 
         LightTheme(colors = themeColors) {
             when (val current = state) {
-                is JoinByPhraseViewModel.State.Input -> LightTextInputEditor(
-                    // No dedicated error slot on the editor, so the top-bar title carries the
-                    // instruction normally and the (short) error after a failed attempt.
-                    title = current.error ?: "Invite phrase",
+                is JoinByPhraseViewModel.State.Input -> LightCodeInput(
+                    // No dedicated error slot, so the top-bar title carries the instruction
+                    // normally and the (short) error after a failed attempt.
+                    title = current.error ?: "Enter code",
                     state = textState,
+                    length = CODE_LENGTH,
                     keyboardOptionsFlow = keyboardOptionsFlow,
                     submitLabel = "JOIN",
-                    singleLine = true,
+                    // Fire automatically the moment the fifth letter lands; the JOIN button /
+                    // Return remain a manual fallback.
+                    onComplete = { viewModel.join(it.toString()) },
                     onSubmit = { viewModel.join(it.toString()) },
                     onBack = { goBack() },
                     modifier = Modifier.background(LightThemeTokens.colors.background),
