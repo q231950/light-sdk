@@ -16,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
@@ -536,7 +537,7 @@ private fun PromotionOption(piece: Piece, onSelect: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .lightClickable { onSelect() }
+            .lightClickable(role = Role.Button) { onSelect() }
             .padding(vertical = 0.75f.gridUnitsAsDp()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
