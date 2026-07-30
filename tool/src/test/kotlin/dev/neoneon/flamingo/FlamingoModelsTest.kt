@@ -83,4 +83,81 @@ class FlamingoModelsTest {
         // The color predicate used by JoinByPhraseScreen / GameView must resolve white, not black.
         assertTrue(samePlayer(response.game.whitePlayerID, myLowercaseId))
     }
+
+    private companion object {
+        // A board a few moves in, so a test FEN's move counter isn't the ambiguous opening.
+        const val MIDGAME_BOARD = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR"
+    }
+
+    private fun game(
+        status: String,
+        fen: String = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        whitePlayerID: String? = "W",
+        blackPlayerID: String? = "B",
+    ) = Game(
+        id = "g",
+        fen = fen,
+        whitePlayerID = whitePlayerID,
+        blackPlayerID = blackPlayerID,
+        status = status,
+        createdAt = "x",
+        updatedAt = "y",
+    )
+
+    @Test
+    fun labelsWaitingGameInWords() {
+        assertEquals("waiting for opponent", game("waitingForOpponent").statusLabel("W"))
+    }
+
+    @Test
+    fun labelsActiveGameByWhoseTurnItIs() {
+        // Game.fen is the position the last move was played *from*, so its side-to-move
+        // field names whoever just moved — the turn belongs to the other color.
+        val whiteJustMoved = game("active", fen = "$MIDGAME_BOARD w KQkq - 0 2")
+        assertEquals("their turn", whiteJustMoved.statusLabel("W"))
+        assertEquals("your turn", whiteJustMoved.statusLabel("B"))
+
+        val blackJustMoved = game("active", fen = "$MIDGAME_BOARD b KQkq - 0 2")
+        assertEquals("your turn", blackJustMoved.statusLabel("W"))
+        assertEquals("their turn", blackJustMoved.statusLabel("B"))
+    }
+
+    @Test
+    fun matchesSeatsCaseInsensitivelyForTurn() {
+        // The server echoes ids UPPERCASE; the locally stored id is lowercase.
+        val active = game(
+            "active",
+            fen = "$MIDGAME_BOARD b KQkq - 0 2",
+            whitePlayerID = "96596872-5FE3-4574-8684-ACA1047AFA23",
+        )
+        assertEquals("your turn", active.statusLabel("96596872-5fe3-4574-8684-aca1047afa23"))
+    }
+
+    @Test
+    fun fallsBackToNeutralActiveLabelWhenTurnIsUnknowable() {
+        val midGame = game("active", fen = "$MIDGAME_BOARD b KQkq - 0 2")
+        // No local identity, and not seated in this game.
+        assertEquals("in progress", midGame.statusLabel(null))
+        assertEquals("in progress", midGame.statusLabel("someone-else"))
+        // A FEN with no side-to-move field.
+        assertEquals("in progress", game("active", fen = "f").statusLabel("W"))
+        // The opening position: reads the same before white's first move and just after it.
+        assertEquals("in progress", game("active").statusLabel("W"))
+        assertEquals("in progress", game("active").statusLabel("B"))
+    }
+
+    @Test
+    fun labelsFinishedGames() {
+        assertEquals("checkmate", game("checkmate").statusLabel("W"))
+        assertEquals("stalemate", game("stalemate").statusLabel("W"))
+        assertEquals("draw", game("draw").statusLabel("W"))
+        assertEquals("resigned", game("resigned").statusLabel("W"))
+    }
+
+    @Test
+    fun humanizesUnknownStatus() {
+        // A status this build doesn't know about must still read as words, not camelCase.
+        assertEquals("timed out", game("timedOut").statusLabel("W"))
+        assertEquals("abandoned", game("abandoned").statusLabel("W"))
+    }
 }

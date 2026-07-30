@@ -20,6 +20,65 @@ private val activeGameStatuses = setOf("active", "waitingForOpponent")
 
 val Game.isActive: Boolean get() = status in activeGameStatuses
 
+/**
+ * The raw backend status rendered for humans — `waitingForOpponent` is no way to talk to
+ * someone. `active` only means "in progress", so it's resolved against [playerId] into whose
+ * move it actually is. The server declares checkmate/stalemate but never writes them today;
+ * they're handled anyway, and anything unrecognized falls back to the split camelCase word.
+ */
+fun Game.statusLabel(playerId: String?): String = when (status) {
+    "waitingForOpponent" -> "waiting for opponent"
+    "active" -> when (isMyTurn(playerId)) {
+        true -> "your turn"
+        false -> "their turn"
+        null -> "in progress"
+    }
+    // Neither the winner of a checkmate nor the resigning player is knowable from a list
+    // entry alone (the resigner lives on the move log), so these stay neutral.
+    "checkmate" -> "checkmate"
+    "stalemate" -> "stalemate"
+    "draw" -> "draw"
+    "resigned" -> "resigned"
+    else -> status.humanized()
+}
+
+/**
+ * Whether it's this player's move, or null when that can't be told.
+ *
+ * `Game.fen` is the position the last move was played *from*, not the one it produced:
+ * both clients send the pre-move FEN (see GameView.submitMove) into the server's
+ * `fen_after` field, and the recorder copies it onto the game — the iOS companion reads
+ * it back the same way, deriving the mover from this field. So the side to move named in
+ * the FEN is whoever just moved, and the move belongs to the *other* color.
+ *
+ * Reads the FEN's fields directly rather than building a Board per list row. Null when
+ * there's no local identity, we hold neither seat, or the FEN carries no side-to-move.
+ */
+private fun Game.isMyTurn(playerId: String?): Boolean? {
+    val iAmWhite = when {
+        samePlayer(playerId, whitePlayerID) -> true
+        samePlayer(playerId, blackPlayerID) -> false
+        else -> return null
+    }
+    val fields = fen.split(' ')
+    val whiteJustMoved = when (fields.getOrNull(1)) {
+        "w" -> true
+        "b" -> false
+        else -> return null
+    }
+    // The opening position is the one case the pre-move FEN can't resolve: it looks
+    // identical before white's first move and right after it (that move was played
+    // *from* the opening), and the list payload carries no move count to break the tie.
+    if (whiteJustMoved && fields.getOrNull(5) == "1") return null
+    return iAmWhite != whiteJustMoved
+}
+
+private val camelCaseBoundary = Regex("(?<=[a-z0-9])(?=[A-Z])")
+
+/** `timedOut` -> `timed out`, so an unrecognized status still reads as words. */
+private fun String.humanized(): String =
+    split(camelCaseBoundary).joinToString(" ") { it.lowercase() }
+
 @Serializable
 data class Move(
     val moveNumber: Int,
