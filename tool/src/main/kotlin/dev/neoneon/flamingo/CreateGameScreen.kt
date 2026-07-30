@@ -1,6 +1,7 @@
 package dev.neoneon.flamingo
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -8,18 +9,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
-import com.thelightphone.sdk.ui.LightIcon
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -196,18 +199,48 @@ private fun ColorOption(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .lightClickable { onSelect(color) }
+            .lightClickable(role = Role.RadioButton) { onSelect(color) }
             .padding(vertical = 0.75f.gridUnitsAsDp()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LightIcon(
-            icon = if (color == selected) LightIcons.SELECT_ON else LightIcons.SELECT_OFF,
-            contentDescription = null,
-        )
+        SelectionDot(isSelected = color == selected)
         LightText(
             text = label,
             variant = LightTextVariant.Copy,
             modifier = Modifier.padding(start = 1f.gridUnitsAsDp()),
         )
     }
+}
+
+/** Diameter of the radio dot, matching the size LightIcons.SELECT_ON renders at. */
+private const val DOT_DIAMETER_GRID_UNITS = 1.8f
+
+/** Ring thickness of an unselected dot, matching the stroke of LightIcons.SELECT_OFF. */
+private const val DOT_STROKE_GRID_UNITS = 0.18f
+
+/**
+ * Radio dot for [ColorOption]: filled when selected, a ring when not.
+ *
+ * Drawn here rather than with LightIcons.SELECT_ON/SELECT_OFF because those drawables place the
+ * circle flush against their viewport origin, so the outer half of the stroke falls outside the
+ * viewport and the rendered circle is clipped flat along its top and left edges.
+ */
+@Composable
+private fun SelectionDot(isSelected: Boolean) {
+    val content = LightThemeTokens.colors.content
+    Box(
+        modifier = Modifier
+            .size(DOT_DIAMETER_GRID_UNITS.gridUnitsAsDp())
+            .then(
+                if (isSelected) {
+                    Modifier.background(color = content, shape = CircleShape)
+                } else {
+                    Modifier.border(
+                        width = DOT_STROKE_GRID_UNITS.gridUnitsAsDp(),
+                        color = content,
+                        shape = CircleShape,
+                    )
+                },
+            ),
+    )
 }
