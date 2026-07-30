@@ -41,7 +41,8 @@ class GamesListViewModel(private val identityStore: PlayerIdentityStore) : Light
 
     sealed class State {
         data object Loading : State()
-        data class Loaded(val games: List<Game>) : State()
+        // Carries the local player id so each row can say whose turn it is.
+        data class Loaded(val games: List<Game>, val playerId: String) : State()
         data class Error(val message: String) : State()
     }
 
@@ -58,7 +59,7 @@ class GamesListViewModel(private val identityStore: PlayerIdentityStore) : Light
             _state.value = State.Loading
             val playerId = identityStore.getOrCreate()
             api.listGames(playerId).fold(
-                onSuccess = { games -> _state.value = State.Loaded(games) },
+                onSuccess = { games -> _state.value = State.Loaded(games, playerId) },
                 onFailure = { error -> _state.value = State.Error(error.message ?: "Unable to load games") },
             )
         }
@@ -160,6 +161,7 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                                 current.games.forEach { game ->
                                     GameListRow(
                                         game = game,
+                                        playerId = current.playerId,
                                         modifier = Modifier
                                             .clickable {
                                                 if (game.isActive) {

@@ -11,6 +11,8 @@ import com.thelightphone.sdk.ui.LightTextVariant
 @Composable
 fun GameListRow(
     game: Game,
+    // This device's player id, so an in-progress game can say whose move it is.
+    playerId: String?,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -21,7 +23,7 @@ fun GameListRow(
             overflow = TextOverflow.Ellipsis,
         )
         LightText(
-            text = game.status,
+            text = game.statusLabel(playerId),
             variant = LightTextVariant.Detail,
             lighten = true,
         )
