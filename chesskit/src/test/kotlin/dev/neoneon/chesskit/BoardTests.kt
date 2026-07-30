@@ -108,6 +108,30 @@ class BoardTests {
         }
     }
 
+    // The move returned by move() has no promoted piece yet, so its LAN is only four characters
+    // and tells a peer nothing about the promotion. Callers must send the completed move's LAN.
+    @Test
+    fun promotionLanCarriesChosenPiece() {
+        for ((kind, suffix) in listOf(
+            Piece.Kind.queen to "q",
+            Piece.Kind.rook to "r",
+            Piece.Kind.bishop to "b",
+            Piece.Kind.knight to "n",
+        )) {
+            val board = Board(Position("k7/7P/8/8/8/8/8/K7 w - - 0 1")!!)
+            val move = board.move(Square.h7, Square.h8)
+            assertNotNull(move)
+            assertEquals("h7h8", move.lan)
+
+            val state = board.state
+            if (state is Board.State.promotion) {
+                assertEquals("h7h8$suffix", board.completePromotion(state.move, kind).lan)
+            } else {
+                fail("Failed to trigger promotion for $move")
+            }
+        }
+    }
+
     @Test
     fun fiftyMoveRule() {
         val board = Board(Position.fiftyMove)
