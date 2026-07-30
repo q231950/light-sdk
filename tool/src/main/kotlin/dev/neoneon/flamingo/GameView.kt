@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import com.thelightphone.sdk.LightScreen
@@ -25,6 +27,8 @@ import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightColors
+import com.thelightphone.sdk.ui.LightColorsPreviewProvider
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -377,156 +381,189 @@ class GameView(
         val themeColors by LightThemeController.colors.collectAsState()
         val state by viewModel.state.collectAsState()
 
-        LightTheme(colors = themeColors) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(LightThemeTokens.colors.background),
-            ) {
-                val promotion = state.promotion
-                val share = state.share
-                when {
-                    // The promotion pane wins: the board is mid-move until a piece is picked.
-                    promotion is GameViewViewModel.Promotion.Pending -> PromotionPane(
-                        color = promotion.move.piece.color,
-                        square = promotion.move.end,
-                        onSelect = { viewModel.onPromotionSelected(it) },
-                    )
-                    share !is GameViewViewModel.Share.Hidden -> SharePane(
-                        share = share,
-                        onClose = { viewModel.closeShare() },
-                    )
-                    else -> GameContent(state)
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun ColumnScope.GameContent(state: GameViewViewModel.State) {
-        // It's the opponent's turn whenever the side to move isn't the color this device plays.
-        // Surfaced as a second line in the nav bar rather than a dedicated strip, so it costs no
-        // vertical space of its own (the bar reserves its height regardless).
-        val waiting = !state.isLoading && state.position.sideToMove != state.localColor
-
-        LightTopBar(
-            leftButton = LightBarButton.LightIcon(
-                icon = LightIcons.BACK,
-                onClick = { goBack() },
-                contentDescription = "Back to games",
-            ),
-            center = if (waiting) {
-                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
-            } else {
-                LightTopBarCenter.Text("Game")
-            },
-            // Offer the phrase only while a seat is still open — once both players are in,
-            // there's no one left to invite.
-            rightButton = if (!state.isLoading && state.hasOpenSeat) {
-                LightBarButton.LightIcon(
-                    icon = LightIcons.SEND,
-                    onClick = { viewModel.openShare() },
-                    contentDescription = "Share invite code",
-                )
-            } else {
-                null
-            },
+        GameScreen(
+            state = state,
+            colors = themeColors,
+            onBack = { goBack() },
+            onOpenShare = { viewModel.openShare() },
+            onCloseShare = { viewModel.closeShare() },
+            onSquareTap = { viewModel.onSquareTapped(it) },
+            onPromotionSelected = { viewModel.onPromotionSelected(it) },
         )
-
-        // Size the board to the smaller of the available width/height so the full 8×8 always
-        // fits below the nav bar, whatever the device's proportions — the board no longer
-        // assumes it can be a full-screen-width square. Pin it to the bottom so any slack
-        // falls as flexible breathing room between the board and the nav bar.
-        BoxWithConstraints(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxSize(),
-            contentAlignment = Alignment.BottomCenter,
-        ) {
-            if (state.isLoading) {
-                LightText(
-                    text = "Loading…",
-                    variant = LightTextVariant.Copy,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            } else {
-                // Tapping a square is a no-op while it's not our turn
-                // (GameViewViewModel.onSquareTapped guards on sideToMove),
-                // so the board can stay on screen instead of being swapped for text.
-                ChessBoard(
-                    position = state.position,
-                    selectedSquare = state.selectedSquare,
-                    legalTargets = state.legalTargets,
-                    onSquareTap = { viewModel.onSquareTapped(it) },
-                    orientation = state.localColor,
-                    boardSize = minOf(maxWidth, maxHeight),
-                )
-            }
-        }
     }
+}
 
-    // The share overlay, shown in place of the board while [share] is non-Hidden. Reuses the
-    // same phrase panel as the create flow (see SharePhraseContent).
-    @Composable
-    private fun ColumnScope.SharePane(share: GameViewViewModel.Share, onClose: () -> Unit) {
-        LightTopBar(
-            leftButton = LightBarButton.LightIcon(
-                icon = LightIcons.BACK,
-                onClick = onClose,
-                contentDescription = "Back to game",
-            ),
-            center = LightTopBarCenter.Text("Invite"),
-        )
-        when (share) {
-            GameViewViewModel.Share.Loading -> CenteredMessage("Getting code…")
-            is GameViewViewModel.Share.Shown -> SharePhraseContent(
-                phrase = share.phrase,
-                buttonLabel = "BACK TO GAME",
-                onDone = onClose,
-            )
-            is GameViewViewModel.Share.Error -> CenteredMessage(share.message)
-            GameViewViewModel.Share.Hidden -> Unit // never rendered by SharePane
-        }
-    }
-
-    // The promotion picker, shown in place of the board while a local move waits on a piece.
-    // There's deliberately no back button: the pawn is already on the last rank and chesskit has
-    // no takeback, so the only way out is to pick one of the four.
-    @Composable
-    private fun ColumnScope.PromotionPane(
-        color: Piece.Color,
-        square: Square,
-        onSelect: (Piece.Kind) -> Unit,
-    ) {
-        LightTopBar(center = LightTopBarCenter.Text("Promote to"))
-
+// The whole screen, driven only by [state] and callbacks so every state it can be in — including
+// a pending promotion — is renderable from a @Preview (see the bottom of this file).
+@Composable
+private fun GameScreen(
+    state: GameViewViewModel.State,
+    colors: LightColors,
+    onBack: () -> Unit,
+    onOpenShare: () -> Unit,
+    onCloseShare: () -> Unit,
+    onSquareTap: (Square) -> Unit,
+    onPromotionSelected: (Piece.Kind) -> Unit,
+) {
+    LightTheme(colors = colors) {
         Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 1f.gridUnitsAsDp()),
-            verticalArrangement = Arrangement.Center,
+                .fillMaxSize()
+                .background(LightThemeTokens.colors.background),
         ) {
-            for (kind in listOf(Piece.Kind.queen, Piece.Kind.rook, Piece.Kind.bishop, Piece.Kind.knight)) {
-                PromotionOption(piece = Piece(kind, color, square), onSelect = { onSelect(kind) })
+            val promotion = state.promotion
+            val share = state.share
+            when {
+                // The promotion pane wins: the board is mid-move until a piece is picked.
+                promotion is GameViewViewModel.Promotion.Pending -> PromotionPane(
+                    color = promotion.move.piece.color,
+                    square = promotion.move.end,
+                    onSelect = onPromotionSelected,
+                )
+                share !is GameViewViewModel.Share.Hidden -> SharePane(
+                    share = share,
+                    onClose = onCloseShare,
+                )
+                else -> GameContent(
+                    state = state,
+                    onBack = onBack,
+                    onOpenShare = onOpenShare,
+                    onSquareTap = onSquareTap,
+                )
             }
         }
     }
+}
 
-    @Composable
-    private fun ColumnScope.CenteredMessage(text: String) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentAlignment = Alignment.Center,
-        ) {
+@Composable
+private fun ColumnScope.GameContent(
+    state: GameViewViewModel.State,
+    onBack: () -> Unit,
+    onOpenShare: () -> Unit,
+    onSquareTap: (Square) -> Unit,
+) {
+    // It's the opponent's turn whenever the side to move isn't the color this device plays.
+    // Surfaced as a second line in the nav bar rather than a dedicated strip, so it costs no
+    // vertical space of its own (the bar reserves its height regardless).
+    val waiting = !state.isLoading && state.position.sideToMove != state.localColor
+
+    LightTopBar(
+        leftButton = LightBarButton.LightIcon(
+            icon = LightIcons.BACK,
+            onClick = onBack,
+            contentDescription = "Back to games",
+        ),
+        center = if (waiting) {
+            LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
+        } else {
+            LightTopBarCenter.Text("Game")
+        },
+        // Offer the phrase only while a seat is still open — once both players are in,
+        // there's no one left to invite.
+        rightButton = if (!state.isLoading && state.hasOpenSeat) {
+            LightBarButton.LightIcon(
+                icon = LightIcons.SEND,
+                onClick = onOpenShare,
+                contentDescription = "Share invite code",
+            )
+        } else {
+            null
+        },
+    )
+
+    // Size the board to the smaller of the available width/height so the full 8×8 always
+    // fits below the nav bar, whatever the device's proportions — the board no longer
+    // assumes it can be a full-screen-width square. Pin it to the bottom so any slack
+    // falls as flexible breathing room between the board and the nav bar.
+    BoxWithConstraints(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxSize(),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        if (state.isLoading) {
             LightText(
-                text = text,
+                text = "Loading…",
                 variant = LightTextVariant.Copy,
-                align = TextAlign.Center,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            // Tapping a square is a no-op while it's not our turn
+            // (GameViewViewModel.onSquareTapped guards on sideToMove),
+            // so the board can stay on screen instead of being swapped for text.
+            ChessBoard(
+                position = state.position,
+                selectedSquare = state.selectedSquare,
+                legalTargets = state.legalTargets,
+                onSquareTap = onSquareTap,
+                orientation = state.localColor,
+                boardSize = minOf(maxWidth, maxHeight),
             )
         }
+    }
+}
+
+// The share overlay, shown in place of the board while [share] is non-Hidden. Reuses the
+// same phrase panel as the create flow (see SharePhraseContent).
+@Composable
+private fun ColumnScope.SharePane(share: GameViewViewModel.Share, onClose: () -> Unit) {
+    LightTopBar(
+        leftButton = LightBarButton.LightIcon(
+            icon = LightIcons.BACK,
+            onClick = onClose,
+            contentDescription = "Back to game",
+        ),
+        center = LightTopBarCenter.Text("Invite"),
+    )
+    when (share) {
+        GameViewViewModel.Share.Loading -> CenteredMessage("Getting code…")
+        is GameViewViewModel.Share.Shown -> SharePhraseContent(
+            phrase = share.phrase,
+            buttonLabel = "BACK TO GAME",
+            onDone = onClose,
+        )
+        is GameViewViewModel.Share.Error -> CenteredMessage(share.message)
+        GameViewViewModel.Share.Hidden -> Unit // never rendered by SharePane
+    }
+}
+
+// The promotion picker, shown in place of the board while a local move waits on a piece.
+// There's deliberately no back button: the pawn is already on the last rank and chesskit has
+// no takeback, so the only way out is to pick one of the four.
+@Composable
+private fun ColumnScope.PromotionPane(
+    color: Piece.Color,
+    square: Square,
+    onSelect: (Piece.Kind) -> Unit,
+) {
+    LightTopBar(center = LightTopBarCenter.Text("Promote to"))
+
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .padding(horizontal = 1f.gridUnitsAsDp()),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        for (kind in listOf(Piece.Kind.queen, Piece.Kind.rook, Piece.Kind.bishop, Piece.Kind.knight)) {
+            PromotionOption(piece = Piece(kind, color, square), onSelect = { onSelect(kind) })
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.CenteredMessage(text: String) {
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        LightText(
+            text = text,
+            variant = LightTextVariant.Copy,
+            align = TextAlign.Center,
+        )
     }
 }
 
@@ -552,4 +589,58 @@ private fun PromotionOption(piece: Piece, onSelect: () -> Unit) {
             modifier = Modifier.padding(start = 1f.gridUnitsAsDp()),
         )
     }
+}
+
+// MARK: Previews
+
+// Builds the state a real promotion leaves behind by actually playing one, rather than
+// hand-assembling a Move — so the previews can't drift from what the board really produces.
+private fun promotingState(): GameViewViewModel.State {
+    val board = Board(Position("k7/7P/8/8/8/8/8/K7 w - - 0 1")!!)
+    val preMoveFen = board.position.fen
+    val move = board.move(pieceAt = Square.h7, to = Square.h8)!!
+
+    return GameViewViewModel.State(
+        position = board.position,
+        localColor = Piece.Color.white,
+        isLoading = false,
+        promotion = GameViewViewModel.Promotion.Pending(move, preMoveFen),
+    )
+}
+
+// Both previews render in each theme via the SDK's provider — the clipped radio dots in the "New
+// game" picker were a light-theme-only bug, so seeing both at once is worth the parameter.
+
+// The picker on its own.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewPromotionPane(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    LightTheme(colors = colors) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(LightThemeTokens.colors.background),
+        ) {
+            PromotionPane(color = Piece.Color.white, square = Square.h8, onSelect = {})
+        }
+    }
+}
+
+// The whole game screen as it looks mid-promotion, dispatched from State exactly as Content() does.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewPromoting(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(
+        state = promotingState(),
+        colors = colors,
+        onBack = {},
+        onOpenShare = {},
+        onCloseShare = {},
+        onSquareTap = {},
+        onPromotionSelected = {},
+    )
 }
