@@ -100,6 +100,9 @@ class GameViewViewModel(
         val blackPlayerId: String? = null,
         val share: Share = Share.Hidden,
         val promotion: Promotion = Promotion.Hidden,
+        // The square of the king currently in check (either color), marked on the board. Stored
+        // rather than derived from [position], which alone can't answer it — see checkedKingSquare.
+        val checkedKingSquare: Square? = null,
     ) {
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
@@ -107,6 +110,14 @@ class GameViewViewModel(
 
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
+
+    // Every publish of a new board position goes through this, so the check marker can't be
+    // forgotten at one of the sites that advance the board (initial load, incoming move, local
+    // move, promotion).
+    private fun State.withCurrentBoard(): State = copy(
+        position = board.position,
+        checkedKingSquare = checkedKingSquare(board.state, board.position),
+    )
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
@@ -163,8 +174,7 @@ class GameViewViewModel(
             Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
         }
         _state.update {
-            it.copy(
-                position = board.position,
+            it.withCurrentBoard().copy(
                 localColor = resolvedColor,
                 isLoading = false,
                 playerId = playerId,
@@ -222,8 +232,7 @@ class GameViewViewModel(
         }
         action.n?.let { if (it > moveCount) moveCount = it }
         _state.update {
-            it.copy(
-                position = board.position,
+            it.withCurrentBoard().copy(
                 selectedSquare = null,
                 legalTargets = emptySet(),
                 moveCount = moveCount,
@@ -272,8 +281,7 @@ class GameViewViewModel(
                         ?.takeIf { board.state is Board.State.promotion }
                         ?.let { Promotion.Pending(it, preMoveFen) }
                     if (move != null && pending == null) submitMove(move, preMoveFen, current.playerId)
-                    current.copy(
-                        position = board.position,
+                    current.withCurrentBoard().copy(
                         selectedSquare = null,
                         legalTargets = emptySet(),
                         moveCount = moveCount,
@@ -306,8 +314,7 @@ class GameViewViewModel(
         submitMove(completed, pending.preMoveFen, current.playerId)
 
         _state.update {
-            it.copy(
-                position = board.position,
+            it.withCurrentBoard().copy(
                 moveCount = moveCount,
                 promotion = Promotion.Hidden,
             )
@@ -498,6 +505,7 @@ private fun ColumnScope.GameContent(
                 onSquareTap = onSquareTap,
                 orientation = state.localColor,
                 boardSize = minOf(maxWidth, maxHeight),
+                checkedKingSquare = state.checkedKingSquare,
             )
         }
     }
@@ -608,7 +616,21 @@ private fun promotingState(): GameViewViewModel.State {
     )
 }
 
-// Both previews render in each theme via the SDK's provider — the clipped radio dots in the "New
+// Likewise for check: the marker is derived from the board's own state after a real checking move
+// (Rg1-h1+), seen from the checked player's side so the board is also flipped.
+private fun checkedState(): GameViewViewModel.State {
+    val board = Board(Position("7k/8/8/8/8/8/8/K5R1 w - - 0 1")!!)
+    board.move(pieceAt = Square.g1, to = Square.h1)
+
+    return GameViewViewModel.State(
+        position = board.position,
+        localColor = Piece.Color.black,
+        isLoading = false,
+        checkedKingSquare = checkedKingSquare(board.state, board.position),
+    )
+}
+
+// Every preview renders in each theme via the SDK's provider — the clipped radio dots in the "New
 // game" picker were a light-theme-only bug, so seeing both at once is worth the parameter.
 
 // The picker on its own.
@@ -636,6 +658,24 @@ private fun PreviewGameViewPromoting(
 ) {
     GameScreen(
         state = promotingState(),
+        colors = colors,
+        onBack = {},
+        onOpenShare = {},
+        onCloseShare = {},
+        onSquareTap = {},
+        onPromotionSelected = {},
+    )
+}
+
+// The board with the king in check: a line along the bottom edge of that one square. It renders at
+// full width here — the left-to-right draw-in is an animation, which previews don't run.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewInCheck(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(
+        state = checkedState(),
         colors = colors,
         onBack = {},
         onOpenShare = {},
