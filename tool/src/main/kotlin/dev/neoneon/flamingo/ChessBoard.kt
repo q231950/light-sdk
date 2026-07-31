@@ -3,11 +3,13 @@ package dev.neoneon.flamingo
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -15,6 +17,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -32,6 +37,14 @@ import dev.neoneon.chesskit.Square
 // rather than a hairline (see LightCodeInput's ACTIVE_UNDERLINE_THICKNESS_PX).
 private const val CHECK_UNDERLINE_THICKNESS_PX = 7f
 private const val CHECK_UNDERLINE_DURATION_MS = 220
+
+// The last-move arrow, in fractions of a square rather than design pixels: unlike the check
+// underline it spans two squares, and its length already varies with the move, so a fixed-pixel
+// arrow would look spindly on a long move and stubby on a short one.
+private const val ARROW_END_INSET = 0.28f    // clears the piece glyph at either end
+private const val ARROW_SHAFT_WIDTH = 0.06f
+private const val ARROW_HEAD_LENGTH = 0.26f
+private const val ARROW_HEAD_HALF_WIDTH = 0.11f
 
 /**
  * The square holding the king that [state] reports as being in check, or `null` if neither is.
@@ -69,6 +82,9 @@ internal fun checkedKingSquare(state: Board.State, position: Position): Square? 
  * [checkedKingSquare] marks the king that's in check with a line along the bottom edge of that one
  * square, drawing in from its left edge to its right. Callers derive it from their board with the
  * `checkedKingSquare` function above.
+ *
+ * [lastMove] draws a small arrow from a move's origin square to its destination. Used to point out
+ * the move a finished game ended on; during play the board is left unmarked.
  */
 @Composable
 fun ChessBoard(
@@ -80,31 +96,117 @@ fun ChessBoard(
     modifier: Modifier = Modifier,
     orientation: Piece.Color = Piece.Color.white,
     checkedKingSquare: Square? = null,
+    lastMove: Pair<Square, Square>? = null,
 ) {
     val squareSize = boardSize / 8
-    val ranks = if (orientation == Piece.Color.black) (1..8) else (8 downTo 1)
-    val files = if (orientation == Piece.Color.black) {
-        Square.File.entries.reversed()
-    } else {
-        Square.File.entries
-    }
-    Column(modifier = modifier) {
-        for (rankValue in ranks) {
-            Row {
-                for (file in files) {
-                    val square = Square(file, Square.Rank(rankValue))
-                    ChessSquare(
-                        piece = position.piece(at = square),
-                        isDark = square.color == Square.Color.dark,
-                        isSelected = square == selectedSquare,
-                        isLegalTarget = square in legalTargets,
-                        isInCheck = square == checkedKingSquare,
-                        squareSize = squareSize,
-                        onTap = { onSquareTap(square) },
-                    )
+    val rankOrder = boardRankOrder(orientation)
+    val fileOrder = boardFileOrder(orientation)
+    // The arrow spans two squares, so unlike the check underline it can't be drawn by a square:
+    // it goes over the whole board, in the same box.
+    Box(modifier = modifier.size(boardSize)) {
+        Column {
+            for (rankValue in rankOrder) {
+                Row {
+                    for (file in fileOrder) {
+                        val square = Square(file, Square.Rank(rankValue))
+                        ChessSquare(
+                            piece = position.piece(at = square),
+                            isDark = square.color == Square.Color.dark,
+                            isSelected = square == selectedSquare,
+                            isLegalTarget = square in legalTargets,
+                            isInCheck = square == checkedKingSquare,
+                            squareSize = squareSize,
+                            onTap = { onSquareTap(square) },
+                        )
+                    }
                 }
             }
         }
+        if (lastMove != null) {
+            LastMoveArrow(
+                from = lastMove.first,
+                to = lastMove.second,
+                fileOrder = fileOrder,
+                rankOrder = rankOrder,
+            )
+        }
+    }
+}
+
+/** The left-to-right file order the board lays out in, seen by a player of [orientation]. */
+internal fun boardFileOrder(orientation: Piece.Color): List<Square.File> =
+    if (orientation == Piece.Color.black) Square.File.entries.reversed() else Square.File.entries
+
+/** The top-to-bottom rank order the board lays out in: your own back rank is nearest you. */
+internal fun boardRankOrder(orientation: Piece.Color): List<Int> =
+    (if (orientation == Piece.Color.black) (1..8) else (8 downTo 1)).toList()
+
+/**
+ * The center of [square] in board pixels, given the board's own layout order and its [squareSize].
+ *
+ * Derived from the same lists the squares are laid out from, so the arrow can't disagree with the
+ * board about which corner is which when it's flipped for black.
+ */
+internal fun squareCenter(
+    square: Square,
+    fileOrder: List<Square.File>,
+    rankOrder: List<Int>,
+    squareSize: Float,
+): Offset = Offset(
+    x = (fileOrder.indexOf(square.file) + 0.5f) * squareSize,
+    y = (rankOrder.indexOf(square.rank.value) + 0.5f) * squareSize,
+)
+
+/** A thin arrow from [from]'s center to [to]'s, drawn over the whole board. */
+@Composable
+private fun LastMoveArrow(
+    from: Square,
+    to: Square,
+    fileOrder: List<Square.File>,
+    rankOrder: List<Int>,
+) {
+    val color = LightThemeTokens.colors.content
+    val description = "Last move ${from.notation} to ${to.notation}"
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .semantics { contentDescription = description },
+    ) {
+        val square = size.width / 8f
+        val start = squareCenter(from, fileOrder, rankOrder, square)
+        val end = squareCenter(to, fileOrder, rankOrder, square)
+        val length = (end - start).getDistance()
+        // A null move can't reach here (chesskit never produces one), but a zero-length vector
+        // would divide by zero below.
+        if (length == 0f) return@Canvas
+
+        val direction = Offset((end.x - start.x) / length, (end.y - start.y) / length)
+        val tip = end - direction * (ARROW_END_INSET * square)
+        val tail = start + direction * (ARROW_END_INSET * square)
+        // Nothing left to draw once the inset eats the whole arrow — impossible for a legal move
+        // (the shortest is one square, and the head fits), but cheap to be sure of.
+        if ((tip - tail).getDistance() <= ARROW_HEAD_LENGTH * square) return@Canvas
+
+        val headBase = tip - direction * (ARROW_HEAD_LENGTH * square)
+        val across = Offset(-direction.y, direction.x) * (ARROW_HEAD_HALF_WIDTH * square)
+
+        drawLine(
+            color = color,
+            start = tail,
+            end = headBase,
+            strokeWidth = ARROW_SHAFT_WIDTH * square,
+            cap = StrokeCap.Round,
+        )
+        drawPath(
+            path = Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(headBase.x + across.x, headBase.y + across.y)
+                lineTo(headBase.x - across.x, headBase.y - across.y)
+                close()
+            },
+            color = color,
+        )
     }
 }
 
