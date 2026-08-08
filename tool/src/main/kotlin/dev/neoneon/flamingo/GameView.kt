@@ -27,6 +27,7 @@ import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightColors
 import com.thelightphone.sdk.ui.LightColorsPreviewProvider
 import com.thelightphone.sdk.ui.LightIcons
@@ -80,10 +81,30 @@ class GameViewViewModel(
      * Not cancellable: by the time chesskit reports [Board.State.promotion] the pawn has already
      * been moved onto the last rank, and there's no takeback to undo it with. The move is also
      * held back from the socket until the choice is made, so the LAN we send carries the piece.
+     *
+     * The *pane* showing the picker is dismissible even so, because that held-back move is
+     * exactly what makes abandoning one safe: the server has never heard of it, and still has
+     * the pawn a rank short with our move outstanding. Any re-fetch restores that — which is why
+     * [loadExistingGame] clears this rather than carrying a Pending across a rebuilt board.
      */
     sealed interface Promotion {
         data object Hidden : Promotion
         data class Pending(val move: Move, val preMoveFen: String) : Promotion
+    }
+
+    /**
+     * Whether the notifications pane is on screen, and at which level.
+     *
+     * Deliberately orthogonal to *what* is pending — that lives in [Promotion] / [DrawOffer] /
+     * [GameOutcome] — so the bell can show and hide the pane without disturbing the decisions
+     * waiting inside it. Modelling the resign confirmation as a level of the pane rather than a
+     * flag beside it makes "confirming while the pane is closed" unrepresentable, and gets it
+     * dismissed by every path that closes the pane.
+     */
+    sealed interface Notifications {
+        data object Hidden : Notifications
+        data object Shown : Notifications
+        data object ConfirmingResign : Notifications
     }
 
     data class State(
@@ -103,9 +124,35 @@ class GameViewViewModel(
         // The square of the king currently in check (either color), marked on the board. Stored
         // rather than derived from [position], which alone can't answer it — see checkedKingSquare.
         val checkedKingSquare: Square? = null,
+        // The bell's toggle. Raised on its own when something lands that needs an answer; closed
+        // by the bell, the pane's back button, or the decision being made.
+        val notifications: Notifications = Notifications.Hidden,
+        val drawOffer: DrawOffer = DrawOffer.None,
+        val outcome: GameOutcome = GameOutcome.InPlay,
     ) {
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
+
+        /** Something is waiting on the player: the pane has real content and the board is frozen. */
+        val hasPendingNotification: Boolean
+            get() = promotion is Promotion.Pending || drawOffer is DrawOffer.Incoming
+
+        val isGameOver: Boolean get() = outcome !is GameOutcome.InPlay
+
+        /** Both seats filled, so there's someone on the other end to make an offer to. */
+        private val hasOpponent: Boolean get() = !isLoading && !hasOpenSeat
+
+        /**
+         * Offering needs a live opponent, a game still in play, nothing already outstanding, and
+         * our own turn — the same gating the iOS companion applies to its Offer Draw menu item.
+         */
+        val canOfferDraw: Boolean
+            get() = hasOpponent && !isGameOver && drawOffer is DrawOffer.None &&
+                promotion is Promotion.Hidden && position.sideToMove == localColor
+
+        /** Resigning is gated on terminality alone: you may concede on the opponent's clock. */
+        val canResign: Boolean
+            get() = hasOpponent && !isGameOver && promotion is Promotion.Hidden
     }
 
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
@@ -159,11 +206,16 @@ class GameViewViewModel(
         var resolvedColor = _state.value.localColor
         var whiteId: String? = _state.value.whitePlayerId
         var blackId: String? = _state.value.blackPlayerId
+        var actions = GameActionState(_state.value.drawOffer, _state.value.outcome)
         api.fetchGame(gameId).onSuccess { detail ->
-            val sorted = detail.moves.sortedBy { it.moveNumber }
+            // Numbers are unique per entry in a log this client wrote, but the iOS companion
+            // derives them from the FEN and so can reuse one after a draw offer. The ISO-8601
+            // timestamp breaks that tie; the sort is stable beyond it.
+            val sorted = detail.moves.sortedWith(compareBy({ it.moveNumber }, { it.timestamp }))
             board = Board()
             sorted.forEach { replayMove(it) }
-            moveCount = sorted.maxOfOrNull { it.moveNumber } ?: 0
+            moveCount = lastLogEntryNumber(sorted)
+            actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
             blackId = detail.game.blackPlayerID
             // The record is authoritative: we're white iff we're the white player, else
@@ -181,6 +233,20 @@ class GameViewViewModel(
                 moveCount = moveCount,
                 whitePlayerId = whiteId,
                 blackPlayerId = blackId,
+                // The move log is authoritative, so these are overwritten rather than merged:
+                // it's what corrects an optimistically applied outcome whose frame never made it
+                // out (transport.send only logs its failures).
+                drawOffer = actions.drawOffer,
+                outcome = actions.outcome,
+                // The board was just rebuilt from scratch, so a Pending here would hold a Move
+                // belonging to a Board that no longer exists. The move was never sent — the pawn
+                // is back a rank short, and it's simply re-playable.
+                promotion = Promotion.Hidden,
+                notifications = if (actions.drawOffer is DrawOffer.Incoming) {
+                    Notifications.Shown
+                } else {
+                    Notifications.Hidden
+                },
             )
         }
     }
@@ -214,11 +280,59 @@ class GameViewViewModel(
         }
     }
 
-    // Applies the opponent's live move to the board so we see it appear immediately.
-    // The server never echoes our own moves back, so this only ever runs for the
-    // opponent's moves — whichever color that is.
+    // Applies a live action to our copy of the game. The server never echoes our own frames
+    // back, so in practice every one of these is the opponent's — but the actor is checked
+    // against our id anyway (case-insensitively; the server echoes ids uppercase), so a frame
+    // that did carry our own id can't be mistaken for theirs and demand an answer.
     private fun applyIncoming(action: LiveAction) {
-        if (action.intent != LiveAction.INTENT_MOVE) return
+        val mine = samePlayer(action.player, _state.value.playerId)
+        // Every action takes a log entry of its own, draws and resignations included, so every
+        // one of them advances the sequence — see lastLogEntryNumber for why reusing a number
+        // would have the server swallow whatever we send next.
+        action.n?.let { if (it > moveCount) moveCount = it }
+
+        when (action.intent) {
+            LiveAction.INTENT_MOVE -> applyIncomingMove(action)
+
+            LiveAction.INTENT_OFFER_DRAW -> _state.update {
+                it.copy(
+                    drawOffer = if (mine) DrawOffer.Outgoing else DrawOffer.Incoming,
+                    // Their offer *is* the notification — raise it rather than wait to be found.
+                    notifications = if (mine) it.notifications else Notifications.Shown,
+                    selectedSquare = null,
+                    legalTargets = emptySet(),
+                )
+            }
+
+            LiveAction.INTENT_ACCEPT_DRAW -> applyTerminal(GameOutcome.DrawAgreed)
+
+            LiveAction.INTENT_DECLINE_DRAW -> _state.update { it.copy(drawOffer = DrawOffer.Declined) }
+
+            LiveAction.INTENT_RESIGN ->
+                applyTerminal(if (mine) GameOutcome.WeResigned else GameOutcome.TheyResigned)
+
+            else -> Unit
+        }
+    }
+
+    // Every terminal transition goes through here, so no path can leave an overlay painted
+    // over a game that's already finished.
+    private fun applyTerminal(outcome: GameOutcome) {
+        _state.update {
+            it.copy(
+                outcome = outcome,
+                drawOffer = DrawOffer.None,
+                promotion = Promotion.Hidden,
+                notifications = Notifications.Hidden,
+                share = Share.Hidden,
+                selectedSquare = null,
+                legalTargets = emptySet(),
+            )
+        }
+    }
+
+    // Applies the opponent's live move to the board so we see it appear immediately.
+    private fun applyIncomingMove(action: LiveAction) {
         val lan = action.lan ?: return
         if (lan.length < 4) return
 
@@ -230,7 +344,6 @@ class GameViewViewModel(
                 board.completePromotion(move, kind)
             }
         }
-        action.n?.let { if (it > moveCount) moveCount = it }
         _state.update {
             it.withCurrentBoard().copy(
                 selectedSquare = null,
@@ -264,11 +377,19 @@ class GameViewViewModel(
             val selected = current.selectedSquare
 
             when {
-                current.isLoading || current.position.sideToMove != current.localColor -> current
+                // Anything waiting on a decision owns the screen: poking the board brings its
+                // pane back up rather than silently doing nothing. Has to come first — the
+                // guards below would otherwise swallow the tap (mid-promotion chesskit has
+                // already flipped sideToMove, so it reads as the opponent's turn).
+                current.hasPendingNotification -> current.copy(
+                    notifications = Notifications.Shown,
+                    selectedSquare = null,
+                    legalTargets = emptySet(),
+                )
 
-                // The pending-promotion guard is belt-and-braces: chesskit has already flipped
-                // sideToMove by then, so the check above catches it too.
-                current.promotion !is Promotion.Hidden -> current
+                current.isGameOver -> current
+
+                current.isLoading || current.position.sideToMove != current.localColor -> current
 
                 selected == square -> current.copy(selectedSquare = null, legalTargets = emptySet())
 
@@ -286,6 +407,14 @@ class GameViewViewModel(
                         legalTargets = emptySet(),
                         moveCount = moveCount,
                         promotion = pending ?: Promotion.Hidden,
+                        drawOffer = if (move != null) {
+                            current.drawOffer.clearedByOurMove()
+                        } else {
+                            current.drawOffer
+                        },
+                        // A promotion needs a piece picked before the move can go out, so put the
+                        // picker up rather than leaving the player to find the bell.
+                        notifications = if (pending != null) Notifications.Shown else current.notifications,
                     )
                 }
 
@@ -308,15 +437,33 @@ class GameViewViewModel(
         val current = _state.value
         val pending = current.promotion as? Promotion.Pending ?: return
 
+        // A re-sync may have rebuilt `board` under us (see loadExistingGame), leaving this Move
+        // pointing at a board that no longer exists — completing against the new one would be
+        // meaningless. Drop the stale pending state and let the player play the pawn again.
+        if (board.state !is Board.State.promotion) {
+            _state.update { it.withCurrentBoard().copy(promotion = Promotion.Hidden) }
+            return
+        }
+
         // Completing and sending happen outside `update`, whose lambda can re-run under
         // contention with the socket coroutine — neither is safe to do twice.
         val completed = board.completePromotion(pending.move, kind)
         submitMove(completed, pending.preMoveFen, current.playerId)
 
         _state.update {
-            it.withCurrentBoard().copy(
-                moveCount = moveCount,
+            val resolved = it.copy(
                 promotion = Promotion.Hidden,
+                drawOffer = it.drawOffer.clearedByOurMove(),
+            )
+            resolved.withCurrentBoard().copy(
+                moveCount = moveCount,
+                // An offer can land while the picker is up — our side has already moved as far
+                // as chesskit is concerned — so only close the pane if nothing else is waiting.
+                notifications = if (resolved.hasPendingNotification) {
+                    Notifications.Shown
+                } else {
+                    Notifications.Hidden
+                },
             )
         }
     }
@@ -342,6 +489,95 @@ class GameViewViewModel(
                 )
             )
         }
+    }
+
+    // Our own move supersedes an offer we're still awaiting a reply to, and retires the news
+    // that one was declined — but it never discards an offer we still owe an answer to.
+    private fun DrawOffer.clearedByOurMove(): DrawOffer =
+        if (this is DrawOffer.Incoming) this else DrawOffer.None
+
+    /**
+     * Sends a draw or resign action over the same socket the moves use.
+     *
+     * There is no `lan` — the server records the action as a move-log entry carrying only the
+     * actor — but `fen` and `n` travel as they do on a move, so the live path writes the same
+     * history the HTTP one would. `fen` is the current position, there being no move for it to
+     * be "pre".
+     *
+     * `n` is the next free log number, so this advances [moveCount] exactly as [submitMove]
+     * does. The iOS companion instead derives `n` from the FEN, which leaves an accept carrying
+     * the same number as the offer it answers — and the recorder, being idempotent per number,
+     * silently drops it (see [lastLogEntryNumber]).
+     */
+    private fun sendGameAction(intent: String) {
+        val fen = board.position.fen
+        moveCount += 1
+        val moveNumber = moveCount
+        val playerId = _state.value.playerId
+
+        viewModelScope.launch(Dispatchers.IO) {
+            transport.send(
+                LiveAction(
+                    intent = intent,
+                    player = playerId ?: identityStore.getOrCreate(),
+                    fen = fen,
+                    n = moveNumber,
+                )
+            )
+        }
+    }
+
+    /** The bell: shows the pane, or puts it away again. */
+    fun toggleNotifications() {
+        _state.update {
+            it.copy(
+                notifications = if (it.notifications is Notifications.Hidden) {
+                    Notifications.Shown
+                } else {
+                    Notifications.Hidden
+                },
+            )
+        }
+    }
+
+    fun closeNotifications() {
+        _state.update { it.copy(notifications = Notifications.Hidden) }
+    }
+
+    // Each of these applies its own outcome locally before sending: the server broadcasts our
+    // frames to the opponent but never echoes them back, so nothing else would ever update us.
+    fun offerDraw() {
+        if (!_state.value.canOfferDraw) return
+        _state.update { it.copy(drawOffer = DrawOffer.Outgoing) }
+        sendGameAction(LiveAction.INTENT_OFFER_DRAW)
+    }
+
+    fun acceptDraw() {
+        if (_state.value.drawOffer !is DrawOffer.Incoming) return
+        applyTerminal(GameOutcome.DrawAgreed)
+        sendGameAction(LiveAction.INTENT_ACCEPT_DRAW)
+    }
+
+    fun declineDraw() {
+        if (_state.value.drawOffer !is DrawOffer.Incoming) return
+        _state.update { it.copy(drawOffer = DrawOffer.None, notifications = Notifications.Hidden) }
+        sendGameAction(LiveAction.INTENT_DECLINE_DRAW)
+    }
+
+    /** Resigning is one tap from losing the game, so it asks first. */
+    fun requestResign() {
+        if (!_state.value.canResign) return
+        _state.update { it.copy(notifications = Notifications.ConfirmingResign) }
+    }
+
+    fun cancelResign() {
+        _state.update { it.copy(notifications = Notifications.Shown) }
+    }
+
+    fun confirmResign() {
+        if (!_state.value.canResign) return
+        applyTerminal(GameOutcome.WeResigned)
+        sendGameAction(LiveAction.INTENT_RESIGN)
     }
 
     // Opens the share overlay and fetches the phrase from the server (which re-mints if the
@@ -391,26 +627,53 @@ class GameView(
         GameScreen(
             state = state,
             colors = themeColors,
-            onBack = { goBack() },
-            onOpenShare = { viewModel.openShare() },
-            onCloseShare = { viewModel.closeShare() },
-            onSquareTap = { viewModel.onSquareTapped(it) },
-            onPromotionSelected = { viewModel.onPromotionSelected(it) },
+            actions = GameActions(
+                onBack = { goBack() },
+                onOpenShare = { viewModel.openShare() },
+                onCloseShare = { viewModel.closeShare() },
+                onSquareTap = { viewModel.onSquareTapped(it) },
+                onPromotionSelected = { viewModel.onPromotionSelected(it) },
+                onToggleNotifications = { viewModel.toggleNotifications() },
+                onCloseNotifications = { viewModel.closeNotifications() },
+                onOfferDraw = { viewModel.offerDraw() },
+                onAcceptDraw = { viewModel.acceptDraw() },
+                onDeclineDraw = { viewModel.declineDraw() },
+                onRequestResign = { viewModel.requestResign() },
+                onCancelResign = { viewModel.cancelResign() },
+                onConfirmResign = { viewModel.confirmResign() },
+            ),
         )
     }
 }
 
-// The whole screen, driven only by [state] and callbacks so every state it can be in — including
-// a pending promotion — is renderable from a @Preview (see the bottom of this file).
+/**
+ * The game screen's callbacks, grouped so [GameScreen] and its previews stay legible — there are
+ * a dozen of them now. The no-op defaults are what let a preview pass state alone.
+ */
+private data class GameActions(
+    val onBack: () -> Unit = {},
+    val onOpenShare: () -> Unit = {},
+    val onCloseShare: () -> Unit = {},
+    val onSquareTap: (Square) -> Unit = {},
+    val onPromotionSelected: (Piece.Kind) -> Unit = {},
+    val onToggleNotifications: () -> Unit = {},
+    val onCloseNotifications: () -> Unit = {},
+    val onOfferDraw: () -> Unit = {},
+    val onAcceptDraw: () -> Unit = {},
+    val onDeclineDraw: () -> Unit = {},
+    val onRequestResign: () -> Unit = {},
+    val onCancelResign: () -> Unit = {},
+    val onConfirmResign: () -> Unit = {},
+)
+
+// The whole screen, driven only by [state] and callbacks so every state it can be in — a pending
+// promotion, a draw offer, a finished game — is renderable from a @Preview (see the bottom of
+// this file).
 @Composable
 private fun GameScreen(
     state: GameViewViewModel.State,
     colors: LightColors,
-    onBack: () -> Unit,
-    onOpenShare: () -> Unit,
-    onCloseShare: () -> Unit,
-    onSquareTap: (Square) -> Unit,
-    onPromotionSelected: (Piece.Kind) -> Unit,
+    actions: GameActions = GameActions(),
 ) {
     LightTheme(colors = colors) {
         Column(
@@ -418,25 +681,25 @@ private fun GameScreen(
                 .fillMaxSize()
                 .background(LightThemeTokens.colors.background),
         ) {
-            val promotion = state.promotion
-            val share = state.share
             when {
-                // The promotion pane wins: the board is mid-move until a piece is picked.
-                promotion is GameViewViewModel.Promotion.Pending -> PromotionPane(
-                    color = promotion.move.piece.color,
-                    square = promotion.move.end,
-                    onSelect = onPromotionSelected,
-                )
-                share !is GameViewViewModel.Share.Hidden -> SharePane(
-                    share = share,
-                    onClose = onCloseShare,
-                )
-                else -> GameContent(
+                // A finished game has nothing left to decide, share or play. applyTerminal
+                // clears both overlays anyway, so this is belt-and-braces — but it means no
+                // frame can paint a stale pane over a result.
+                state.isGameOver -> GameOverPane(state = state, onBack = actions.onBack)
+
+                // The notifications pane outranks the share one: it can be holding a decision
+                // that's freezing the board, while share is only ever opened deliberately.
+                state.notifications !is GameViewViewModel.Notifications.Hidden -> NotificationsPane(
                     state = state,
-                    onBack = onBack,
-                    onOpenShare = onOpenShare,
-                    onSquareTap = onSquareTap,
+                    actions = actions,
                 )
+
+                state.share !is GameViewViewModel.Share.Hidden -> SharePane(
+                    share = state.share,
+                    onClose = actions.onCloseShare,
+                )
+
+                else -> GameContent(state = state, actions = actions)
             }
         }
     }
@@ -445,9 +708,7 @@ private fun GameScreen(
 @Composable
 private fun ColumnScope.GameContent(
     state: GameViewViewModel.State,
-    onBack: () -> Unit,
-    onOpenShare: () -> Unit,
-    onSquareTap: (Square) -> Unit,
+    actions: GameActions,
 ) {
     // It's the opponent's turn whenever the side to move isn't the color this device plays.
     // Surfaced as a second line in the nav bar rather than a dedicated strip, so it costs no
@@ -457,31 +718,56 @@ private fun ColumnScope.GameContent(
     LightTopBar(
         leftButton = LightBarButton.LightIcon(
             icon = LightIcons.BACK,
-            onClick = onBack,
+            onClick = actions.onBack,
             contentDescription = "Back to games",
         ),
-        center = if (waiting) {
-            LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
-        } else {
-            LightTopBarCenter.Text("Game")
+        // Whatever is waiting on the player outranks `waiting`, which is otherwise a flat lie
+        // mid-promotion: chesskit flips the side to move the instant the pawn lands, so the bar
+        // would read "Waiting for opponent…" while it is really waiting for you.
+        center = when {
+            state.promotion is GameViewViewModel.Promotion.Pending ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Pick a piece to finish")
+            state.drawOffer is DrawOffer.Incoming ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Draw offered")
+            waiting ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
+            else -> LightTopBarCenter.Text("Game")
         },
-        // Offer the phrase only while a seat is still open — once both players are in,
-        // there's no one left to invite.
-        rightButton = if (!state.isLoading && state.hasOpenSeat) {
-            LightBarButton.LightIcon(
+        // The bar has one right slot, and the two buttons that want it are near enough mutually
+        // exclusive: a draw needs an opponent, and the invite button exists precisely because
+        // there isn't one yet. The exception is worth spelling out — white can play, and
+        // promote, before anyone joins, and a pane you can't re-open is a dead end.
+        rightButton = when {
+            state.isLoading -> null
+            state.hasPendingNotification || !state.hasOpenSeat -> LightBarButton.LightIcon(
+                icon = LightIcons.ALARM,
+                onClick = actions.onToggleNotifications,
+                contentDescription = if (state.promotion is GameViewViewModel.Promotion.Pending) {
+                    "Finish promotion"
+                } else {
+                    "Notifications"
+                },
+            )
+            else -> LightBarButton.LightIcon(
                 icon = LightIcons.SEND,
-                onClick = onOpenShare,
+                onClick = actions.onOpenShare,
                 contentDescription = "Share invite code",
             )
-        } else {
-            null
         },
     )
 
-    // Size the board to the smaller of the available width/height so the full 8×8 always
-    // fits below the nav bar, whatever the device's proportions — the board no longer
-    // assumes it can be a full-screen-width square. Pin it to the bottom so any slack
-    // falls as flexible breathing room between the board and the nav bar.
+    BoardBody(state = state, onSquareTap = actions.onSquareTap)
+}
+
+// The board itself, sized to the smaller of the available width/height so the full 8×8 always
+// fits below the nav bar, whatever the device's proportions — the board no longer assumes it can
+// be a full-screen-width square. Pinned to the bottom so any slack falls as flexible breathing
+// room between the board and the nav bar. Shared with the finished-game screen.
+@Composable
+private fun ColumnScope.BoardBody(
+    state: GameViewViewModel.State,
+    onSquareTap: (Square) -> Unit,
+) {
     BoxWithConstraints(
         modifier = Modifier
             .weight(1f)
@@ -535,17 +821,80 @@ private fun ColumnScope.SharePane(share: GameViewViewModel.Share, onClose: () ->
     }
 }
 
-// The promotion picker, shown in place of the board while a local move waits on a piece.
-// There's deliberately no back button: the pawn is already on the last rank and chesskit has
-// no takeback, so the only way out is to pick one of the four.
+/**
+ * The one pane the bell opens: whatever is currently waiting on the player.
+ *
+ * A pending promotion outranks a draw offer — it's holding back a move of ours — and both
+ * outrank the idle offer-draw / resign actions. Always dismissible; see [GameViewViewModel.Promotion]
+ * for why that's safe even mid-promotion.
+ */
 @Composable
-private fun ColumnScope.PromotionPane(
+private fun ColumnScope.NotificationsPane(
+    state: GameViewViewModel.State,
+    actions: GameActions,
+) {
+    LightTopBar(
+        leftButton = LightBarButton.LightIcon(
+            icon = LightIcons.BACK,
+            onClick = actions.onCloseNotifications,
+            contentDescription = "Back to game",
+        ),
+        center = LightTopBarCenter.Text(notificationsTitle(state)),
+    )
+
+    val promotion = state.promotion
+    when {
+        promotion is GameViewViewModel.Promotion.Pending -> PromotionOptions(
+            color = promotion.move.piece.color,
+            square = promotion.move.end,
+            onSelect = actions.onPromotionSelected,
+        )
+
+        state.notifications is GameViewViewModel.Notifications.ConfirmingResign -> {
+            CenteredMessage("You will lose the game.")
+            LightBottomBar(
+                items = listOf(
+                    LightBarButton.Text(text = "CANCEL", onClick = actions.onCancelResign),
+                    LightBarButton.Text(text = "RESIGN", onClick = actions.onConfirmResign),
+                ),
+            )
+        }
+
+        state.drawOffer is DrawOffer.Incoming -> {
+            CenteredMessage("Your opponent offers a draw.")
+            LightBottomBar(
+                items = listOf(
+                    LightBarButton.Text(text = "DECLINE", onClick = actions.onDeclineDraw),
+                    LightBarButton.Text(text = "ACCEPT", onClick = actions.onAcceptDraw),
+                ),
+            )
+        }
+
+        state.drawOffer is DrawOffer.Outgoing -> CenteredMessage("Draw offered.\nWaiting for a reply.")
+
+        state.drawOffer is DrawOffer.Declined -> CenteredMessage("Your draw offer was declined.")
+
+        else -> ActionOptions(state = state, actions = actions)
+    }
+}
+
+// Titling the pane with the section beats a generic "Notifications": it says what the player is
+// looking at before they've read a word of the body.
+private fun notificationsTitle(state: GameViewViewModel.State): String = when {
+    state.promotion is GameViewViewModel.Promotion.Pending -> "Promote to"
+    state.notifications is GameViewViewModel.Notifications.ConfirmingResign -> "Resign?"
+    state.drawOffer is DrawOffer.None -> "Game actions"
+    else -> "Draw offer"
+}
+
+// The four pieces a pawn on the last rank can become. Lifted out of the old PromotionPane so the
+// notifications pane can host it rather than duplicate it.
+@Composable
+private fun ColumnScope.PromotionOptions(
     color: Piece.Color,
     square: Square,
     onSelect: (Piece.Kind) -> Unit,
 ) {
-    LightTopBar(center = LightTopBarCenter.Text("Promote to"))
-
     Column(
         modifier = Modifier
             .weight(1f)
@@ -557,6 +906,62 @@ private fun ColumnScope.PromotionPane(
             PromotionOption(piece = Piece(kind, color, square), onSelect = { onSelect(kind) })
         }
     }
+}
+
+// What the player can start from here when nothing is waiting on them.
+@Composable
+private fun ColumnScope.ActionOptions(
+    state: GameViewViewModel.State,
+    actions: GameActions,
+) {
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .padding(horizontal = 1f.gridUnitsAsDp()),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        ActionRow(label = "Offer draw", enabled = state.canOfferDraw, onClick = actions.onOfferDraw)
+        ActionRow(label = "Resign", enabled = state.canResign, onClick = actions.onRequestResign)
+    }
+}
+
+// One row of the actions list. Shaped like PromotionOption without a piece glyph. A row that
+// isn't available right now is greyed rather than dropped: one that vanished on the opponent's
+// turn would read as a bug.
+@Composable
+private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+    LightText(
+        text = label,
+        variant = LightTextVariant.Copy,
+        lighten = !enabled,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (enabled) Modifier.lightClickable(role = Role.Button) { onClick() } else Modifier)
+            .padding(vertical = 0.75f.gridUnitsAsDp()),
+    )
+}
+
+// A finished game: the final position, frozen, under the result. The board stays on screen —
+// it's the thing worth looking at — and the only action left is leaving.
+@Composable
+private fun ColumnScope.GameOverPane(state: GameViewViewModel.State, onBack: () -> Unit) {
+    LightTopBar(
+        leftButton = LightBarButton.LightIcon(
+            icon = LightIcons.BACK,
+            onClick = onBack,
+            contentDescription = "Back to games",
+        ),
+        center = LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.outcome.label),
+    )
+
+    BoardBody(state = state, onSquareTap = {})
+
+    LightBottomBar(
+        items = listOf(
+            LightBarButton.Text(text = "BACK TO GAMES", onClick = onBack),
+        ),
+    )
 }
 
 @Composable
@@ -613,6 +1018,25 @@ private fun promotingState(): GameViewViewModel.State {
         localColor = Piece.Color.white,
         isLoading = false,
         promotion = GameViewViewModel.Promotion.Pending(move, preMoveFen),
+        // A promotion raises the pane on its own — see onSquareTapped.
+        notifications = GameViewViewModel.Notifications.Shown,
+    )
+}
+
+// A game a few moves in with both seats filled: what every draw/resign preview starts from,
+// since none of those actions is available until there's an opponent to make them to.
+private fun playedGameState(): GameViewViewModel.State {
+    val board = Board()
+    board.move(pieceAt = Square.e2, to = Square.e4)
+    board.move(pieceAt = Square.e7, to = Square.e5)
+
+    return GameViewViewModel.State(
+        position = board.position,
+        localColor = Piece.Color.white,
+        isLoading = false,
+        playerId = "us",
+        whitePlayerId = "us",
+        blackPlayerId = "them",
     )
 }
 
@@ -633,38 +1057,82 @@ private fun checkedState(): GameViewViewModel.State {
 // Every preview renders in each theme via the SDK's provider — the clipped radio dots in the "New
 // game" picker were a light-theme-only bug, so seeing both at once is worth the parameter.
 
-// The picker on its own.
-@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
-@Composable
-private fun PreviewPromotionPane(
-    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
-) {
-    LightTheme(colors = colors) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(LightThemeTokens.colors.background),
-        ) {
-            PromotionPane(color = Piece.Color.white, square = Square.h8, onSelect = {})
-        }
-    }
-}
-
 // The whole game screen as it looks mid-promotion, dispatched from State exactly as Content() does.
 @Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
 @Composable
 private fun PreviewGameViewPromoting(
     @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
 ) {
+    GameScreen(state = promotingState(), colors = colors)
+}
+
+// The same promotion with the pane put away — the state the bell makes reachable. Worth its own
+// preview: it's the one place the board shows a pawn sitting unpromoted on the last rank, and the
+// nav bar has to say why rather than claiming we're waiting on the opponent.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewPromotionDismissed(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
     GameScreen(
-        state = promotingState(),
+        state = promotingState().copy(notifications = GameViewViewModel.Notifications.Hidden),
         colors = colors,
-        onBack = {},
-        onOpenShare = {},
-        onCloseShare = {},
-        onSquareTap = {},
-        onPromotionSelected = {},
     )
+}
+
+// An offer from the opponent, which raises the pane by itself.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewDrawOffered(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(
+        state = playedGameState().copy(
+            drawOffer = DrawOffer.Incoming,
+            notifications = GameViewViewModel.Notifications.Shown,
+        ),
+        colors = colors,
+    )
+}
+
+// The pane as the bell opens it with nothing pending: the two actions the player can start.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewActions(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(
+        state = playedGameState().copy(notifications = GameViewViewModel.Notifications.Shown),
+        colors = colors,
+    )
+}
+
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewResignConfirm(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(
+        state = playedGameState().copy(notifications = GameViewViewModel.Notifications.ConfirmingResign),
+        colors = colors,
+    )
+}
+
+// The two ways a game can now end, both showing the final position under the result.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewDrawAgreed(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(state = playedGameState().copy(outcome = GameOutcome.DrawAgreed), colors = colors)
+}
+
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewOpponentResigned(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(state = playedGameState().copy(outcome = GameOutcome.TheyResigned), colors = colors)
 }
 
 // The board with the king in check: a line along the bottom edge of that one square. It renders at
@@ -674,13 +1142,5 @@ private fun PreviewGameViewPromoting(
 private fun PreviewGameViewInCheck(
     @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
 ) {
-    GameScreen(
-        state = checkedState(),
-        colors = colors,
-        onBack = {},
-        onOpenShare = {},
-        onCloseShare = {},
-        onSquareTap = {},
-        onPromotionSelected = {},
-    )
+    GameScreen(state = checkedState(), colors = colors)
 }

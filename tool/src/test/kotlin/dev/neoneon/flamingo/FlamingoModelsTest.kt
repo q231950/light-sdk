@@ -56,6 +56,47 @@ class FlamingoModelsTest {
         assertEquals(2, detail.moves.size)
         assertEquals("e2e4", detail.moves[0].lan)
         assertNull(detail.moves[1].lan)
+        // This body predates the action fields; they must stay optional so older games decode.
+        assertNull(detail.moves[1].drawOfferPlayerID)
+        assertNull(detail.moves[1].drawAcceptPlayerID)
+        assertNull(detail.moves[1].drawDeclinePlayerID)
+        assertNull(detail.moves[1].resignPlayerID)
+    }
+
+    @Test
+    fun decodesDrawOfferAndResignMoveEntries() {
+        // Real MoveDTO shape for the two entries that end (or try to end) a game: `lan` is null
+        // and exactly one actor id is set, the rest omitted entirely (Swift encodes nil as absent).
+        val body = """{"game":{"id":"g","fen":"f","status":"resigned","createdAt":"x","updatedAt":"y",""" +
+            """"whitePlayerID":"W","blackPlayerID":"B"},"moves":[""" +
+            """{"moveNumber":2,"lan":null,"fenAfter":"f1","timestamp":"t","id":"m1",""" +
+            """"drawOfferPlayerID":"AB98F326-AA39-4F83-8E15-EA8ECABBFC05"},""" +
+            """{"moveNumber":2,"lan":null,"fenAfter":"f1","timestamp":"u","id":"m2",""" +
+            """"resignPlayerID":"96596872-5FE3-4574-8684-ACA1047AFA23"}]}"""
+
+        val detail = json.decodeFromString<GameDetail>(body)
+
+        assertEquals("AB98F326-AA39-4F83-8E15-EA8ECABBFC05", detail.moves[0].drawOfferPlayerID)
+        assertNull(detail.moves[0].resignPlayerID)
+        assertEquals("96596872-5FE3-4574-8684-ACA1047AFA23", detail.moves[1].resignPlayerID)
+        assertNull(detail.moves[1].drawOfferPlayerID)
+    }
+
+    @Test
+    fun decodesDrawAcceptAndDeclineMoveEntries() {
+        val body = """{"game":{"id":"g","fen":"f","status":"draw","createdAt":"x","updatedAt":"y",""" +
+            """"whitePlayerID":"W","blackPlayerID":"B"},"moves":[""" +
+            """{"moveNumber":2,"lan":null,"fenAfter":"f1","timestamp":"t","id":"m1",""" +
+            """"drawDeclinePlayerID":"B"},""" +
+            """{"moveNumber":3,"lan":null,"fenAfter":"f1","timestamp":"u","id":"m2",""" +
+            """"drawAcceptPlayerID":"W"}]}"""
+
+        val detail = json.decodeFromString<GameDetail>(body)
+
+        assertEquals("B", detail.moves[0].drawDeclinePlayerID)
+        assertNull(detail.moves[0].drawAcceptPlayerID)
+        assertEquals("W", detail.moves[1].drawAcceptPlayerID)
+        assertNull(detail.moves[1].drawDeclinePlayerID)
     }
 
     @Test

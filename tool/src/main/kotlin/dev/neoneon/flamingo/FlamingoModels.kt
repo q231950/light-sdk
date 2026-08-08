@@ -89,6 +89,14 @@ data class Move(
     val fenAfter: String,
     val timestamp: String,
     val id: String,
+    // The four game actions the backend records as move-log entries rather than on the game
+    // itself. At most one is set on any entry, and an entry that sets one carries no [lan] —
+    // the actor's id is the whole payload. Optional so bodies written before this build (and
+    // the plain moves that make up most of a log) still decode.
+    val drawOfferPlayerID: String? = null,
+    val drawAcceptPlayerID: String? = null,
+    val drawDeclinePlayerID: String? = null,
+    val resignPlayerID: String? = null,
 )
 
 @Serializable
