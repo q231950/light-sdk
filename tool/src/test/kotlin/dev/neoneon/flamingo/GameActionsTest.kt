@@ -81,46 +81,37 @@ class GameActionsTest {
         val theyAccepted = listOf(
             entry(1),
             offer(2, by = US_ECHOED),
-            entry(2, lan = null, drawAcceptPlayerID = THEM),
+            entry(3, lan = null, drawAcceptPlayerID = THEM),
         )
-        assertEquals(GameOutcome.DrawAgreed, gameActionState(theyAccepted, US_STORED).outcome)
+        assertEquals(
+            // Accepting settles the offer that produced it, so nothing is left to answer.
+            GameActionState(drawOffer = DrawOffer.None, agreedDraw = true),
+            gameActionState(theyAccepted, US_STORED),
+        )
 
         val weAccepted = listOf(
             entry(1),
             offer(2, by = THEM),
-            entry(2, lan = null, drawAcceptPlayerID = US_ECHOED),
+            entry(3, lan = null, drawAcceptPlayerID = US_ECHOED),
         )
-        assertEquals(GameOutcome.DrawAgreed, gameActionState(weAccepted, US_STORED).outcome)
-        // An agreed draw leaves nothing outstanding to answer.
-        assertEquals(DrawOffer.None, gameActionState(weAccepted, US_STORED).drawOffer)
+        assertEquals(
+            GameActionState(drawOffer = DrawOffer.None, agreedDraw = true),
+            gameActionState(weAccepted, US_STORED),
+        )
     }
 
     @Test
-    fun resignByUsIsWeResigned() {
-        val moves = listOf(entry(1), entry(2, lan = null, resignPlayerID = US_ECHOED))
-
-        assertEquals(GameOutcome.WeResigned, gameActionState(moves, US_STORED).outcome)
-    }
-
-    @Test
-    fun resignByThemIsTheyResigned() {
-        val moves = listOf(entry(1), entry(2, lan = null, resignPlayerID = THEM))
-
-        assertEquals(GameOutcome.TheyResigned, gameActionState(moves, US_STORED).outcome)
-    }
-
-    @Test
-    fun resignWinsOverAPendingOffer() {
-        // Offering and then resigning rather than waiting for an answer: the game is over, and
-        // the unanswered offer must not still be demanding a decision.
+    fun anAgreementAnywhereInTheLogOutranksALaterOffer() {
+        // A game can't be un-drawn by whatever the server happens to have recorded afterwards,
+        // and the stale offer must not still be demanding a decision.
         val moves = listOf(
             entry(1),
-            offer(2, by = THEM),
-            entry(2, lan = null, resignPlayerID = THEM),
+            entry(2, lan = null, drawAcceptPlayerID = THEM),
+            offer(3, by = THEM),
         )
 
         assertEquals(
-            GameActionState(drawOffer = DrawOffer.None, outcome = GameOutcome.TheyResigned),
+            GameActionState(drawOffer = DrawOffer.None, agreedDraw = true),
             gameActionState(moves, US_STORED),
         )
     }

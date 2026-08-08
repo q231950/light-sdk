@@ -67,6 +67,13 @@ class GameViewViewModel(
     private var moveCount = 0
     private var hasLoadedInitialState = false
 
+    // The move the board is currently sitting on, and the two ways a game can end that leave no
+    // trace on it — someone gave up, or both agreed. All three feed the finished-game presentation
+    // through withCurrentBoard; none is derivable from the position.
+    private var lastMove: Move? = null
+    private var resignedColor: Piece.Color? = null
+    private var agreedDraw = false
+
     /** The invite-phrase share overlay's state, layered over the board on demand. */
     sealed interface Share {
         data object Hidden : Share
@@ -124,11 +131,14 @@ class GameViewViewModel(
         // The square of the king currently in check (either color), marked on the board. Stored
         // rather than derived from [position], which alone can't answer it — see checkedKingSquare.
         val checkedKingSquare: Square? = null,
+        // The from/to squares of the move just played, pointed out by an arrow once the game is
+        // over, and how it ended. Null outcome means the game is still on.
+        val lastMove: Pair<Square, Square>? = null,
+        val outcome: GameOutcome? = null,
         // The bell's toggle. Raised on its own when something lands that needs an answer; closed
         // by the bell, the pane's back button, or the decision being made.
         val notifications: Notifications = Notifications.Hidden,
         val drawOffer: DrawOffer = DrawOffer.None,
-        val outcome: GameOutcome = GameOutcome.InPlay,
     ) {
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
@@ -136,8 +146,6 @@ class GameViewViewModel(
         /** Something is waiting on the player: the pane has real content and the board is frozen. */
         val hasPendingNotification: Boolean
             get() = promotion is Promotion.Pending || drawOffer is DrawOffer.Incoming
-
-        val isGameOver: Boolean get() = outcome !is GameOutcome.InPlay
 
         /** Both seats filled, so there's someone on the other end to make an offer to. */
         private val hasOpponent: Boolean get() = !isLoading && !hasOpenSeat
@@ -147,23 +155,25 @@ class GameViewViewModel(
          * our own turn — the same gating the iOS companion applies to its Offer Draw menu item.
          */
         val canOfferDraw: Boolean
-            get() = hasOpponent && !isGameOver && drawOffer is DrawOffer.None &&
+            get() = hasOpponent && outcome == null && drawOffer is DrawOffer.None &&
                 promotion is Promotion.Hidden && position.sideToMove == localColor
 
         /** Resigning is gated on terminality alone: you may concede on the opponent's clock. */
         val canResign: Boolean
-            get() = hasOpponent && !isGameOver && promotion is Promotion.Hidden
+            get() = hasOpponent && outcome == null && promotion is Promotion.Hidden
     }
 
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
 
-    // Every publish of a new board position goes through this, so the check marker can't be
-    // forgotten at one of the sites that advance the board (initial load, incoming move, local
-    // move, promotion).
+    // Every publish of a new board position goes through this, so the check marker, the last move
+    // and the outcome can't be forgotten at one of the sites that advance the board (initial load,
+    // incoming move, local move, promotion).
     private fun State.withCurrentBoard(): State = copy(
         position = board.position,
         checkedKingSquare = checkedKingSquare(board.state, board.position),
+        lastMove = this@GameViewViewModel.lastMove?.let { it.start to it.end },
+        outcome = gameOutcome(board.state, resignedColor, agreedDraw),
     )
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
@@ -181,7 +191,9 @@ class GameViewViewModel(
         } else {
             // Returning to foreground: if we were waiting for the opponent, a move may have
             // landed while we were backgrounded — re-sync before reconnecting the socket.
+            // A finished game has nothing left to sync or listen for.
             viewModelScope.launch(Dispatchers.IO) {
+                if (_state.value.outcome != null) return@launch
                 if (isWaitingForOpponent()) loadExistingGame()
                 connect()
             }
@@ -206,18 +218,24 @@ class GameViewViewModel(
         var resolvedColor = _state.value.localColor
         var whiteId: String? = _state.value.whitePlayerId
         var blackId: String? = _state.value.blackPlayerId
-        var actions = GameActionState(_state.value.drawOffer, _state.value.outcome)
+        var actions = GameActionState(_state.value.drawOffer, agreedDraw)
         api.fetchGame(gameId).onSuccess { detail ->
             // Numbers are unique per entry in a log this client wrote, but the iOS companion
             // derives them from the FEN and so can reuse one after a draw offer. The ISO-8601
             // timestamp breaks that tie; the sort is stable beyond it.
             val sorted = detail.moves.sortedWith(compareBy({ it.moveNumber }, { it.timestamp }))
             board = Board()
+            lastMove = null
             sorted.forEach { replayMove(it) }
             moveCount = lastLogEntryNumber(sorted)
             actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
             blackId = detail.game.blackPlayerID
+            // The log is authoritative about how the game ended: these two feed withCurrentBoard,
+            // and re-reading them is what corrects an outcome we applied optimistically on a frame
+            // that never actually made it out (transport.send only logs its failures).
+            resignedColor = sorted.resignedColor(whiteId, blackId)
+            agreedDraw = actions.agreedDraw
             // The record is authoritative: we're white iff we're the white player, else
             // black (a black creator, or a not-yet-joined invitee whose seat is still open).
             resolvedColor =
@@ -233,11 +251,7 @@ class GameViewViewModel(
                 moveCount = moveCount,
                 whitePlayerId = whiteId,
                 blackPlayerId = blackId,
-                // The move log is authoritative, so these are overwritten rather than merged:
-                // it's what corrects an optimistically applied outcome whose frame never made it
-                // out (transport.send only logs its failures).
                 drawOffer = actions.drawOffer,
-                outcome = actions.outcome,
                 // The board was just rebuilt from scratch, so a Pending here would hold a Move
                 // belonging to a Board that no longer exists. The move was never sent — the pawn
                 // is back a rank short, and it's simply re-playable.
@@ -249,9 +263,16 @@ class GameViewViewModel(
                 },
             )
         }
+        // Revisiting a game that's already over: there's nothing left to hear, so don't hold a
+        // socket open for it. A game that ends *while* we're watching keeps its connection —
+        // harmless, and it's the path the opponent's resignation would still arrive on.
+        if (_state.value.outcome != null) transport.disconnect()
     }
 
+    // No-op once the game is over: a finished game has nothing left to send or hear, and every
+    // path that reconnects (first show, foreground, resync) can reach here after it ended.
     private suspend fun connect() {
+        if (_state.value.outcome != null) return
         val playerId = _state.value.playerId ?: identityStore.getOrCreate()
         transport.connect(gameId, playerId)
     }
@@ -304,30 +325,13 @@ class GameViewViewModel(
                 )
             }
 
-            LiveAction.INTENT_ACCEPT_DRAW -> applyTerminal(GameOutcome.DrawAgreed)
+            LiveAction.INTENT_ACCEPT_DRAW -> applyAgreedDraw()
 
             LiveAction.INTENT_DECLINE_DRAW -> _state.update { it.copy(drawOffer = DrawOffer.Declined) }
 
-            LiveAction.INTENT_RESIGN ->
-                applyTerminal(if (mine) GameOutcome.WeResigned else GameOutcome.TheyResigned)
+            LiveAction.INTENT_RESIGN -> applyResignation(action.player)
 
             else -> Unit
-        }
-    }
-
-    // Every terminal transition goes through here, so no path can leave an overlay painted
-    // over a game that's already finished.
-    private fun applyTerminal(outcome: GameOutcome) {
-        _state.update {
-            it.copy(
-                outcome = outcome,
-                drawOffer = DrawOffer.None,
-                promotion = Promotion.Hidden,
-                notifications = Notifications.Hidden,
-                share = Share.Hidden,
-                selectedSquare = null,
-                legalTargets = emptySet(),
-            )
         }
     }
 
@@ -339,9 +343,10 @@ class GameViewViewModel(
         val from = Square(lan.substring(0, 2))
         val to = Square(lan.substring(2, 4))
         val move = board.move(pieceAt = from, to = to) ?: return
+        lastMove = move
         if (lan.length == 5 && board.state is Board.State.promotion) {
             Piece.Kind.fromRawValue(lan.last().uppercase())?.let { kind ->
-                board.completePromotion(move, kind)
+                lastMove = board.completePromotion(move, kind)
             }
         }
         _state.update {
@@ -353,6 +358,36 @@ class GameViewViewModel(
         }
     }
 
+    // The opponent gave up while we're watching. The frame moves no pieces — it names a player —
+    // so the board is left exactly as it stands and only the outcome changes, which is the whole
+    // difference between a resignation and every other way a game ends. An unrecognized player is
+    // ignored rather than ending the game on a frame we can't attribute to a seat.
+    private fun applyResignation(playerId: String) {
+        val current = _state.value
+        resignedColor = colorOfPlayer(playerId, current.whitePlayerId, current.blackPlayerId) ?: return
+        _state.update { it.withCurrentBoard().endedGame() }
+    }
+
+    // Both players settled on a draw. Like a resignation the frame moves no pieces, so the board
+    // is left exactly as it stands; unlike every other draw, chesskit can't see this one coming,
+    // which is why agreement is carried alongside the board rather than read off it.
+    private fun applyAgreedDraw() {
+        agreedDraw = true
+        _state.update { it.withCurrentBoard().endedGame() }
+    }
+
+    // A finished game has nothing left to decide, share or play, so every overlay comes down and
+    // the board's selection with it. Every path that ends a game goes through here, so none of
+    // them can leave a pane painted over the result.
+    private fun State.endedGame(): State = copy(
+        drawOffer = DrawOffer.None,
+        promotion = Promotion.Hidden,
+        notifications = Notifications.Hidden,
+        share = Share.Hidden,
+        selectedSquare = null,
+        legalTargets = emptySet(),
+    )
+
     // Applies a previously recorded move's LAN to [board], completing promotions
     // where needed. Draw-offer/resign log entries carry no LAN and are skipped.
     private fun replayMove(stored: dev.neoneon.flamingo.Move) {
@@ -362,10 +397,11 @@ class GameViewViewModel(
         val from = Square(lan.substring(0, 2))
         val to = Square(lan.substring(2, 4))
         val move = board.move(pieceAt = from, to = to) ?: return
+        lastMove = move
 
         if (lan.length == 5 && board.state is Board.State.promotion) {
             Piece.Kind.fromRawValue(lan.last().uppercase())?.let { kind ->
-                board.completePromotion(move, kind)
+                lastMove = board.completePromotion(move, kind)
             }
         }
     }
@@ -387,7 +423,9 @@ class GameViewViewModel(
                     legalTargets = emptySet(),
                 )
 
-                current.isGameOver -> current
+                // A finished board is done being played. Without this, a mated player could still
+                // select their pieces — every one of them with no legal target.
+                current.outcome != null -> current
 
                 current.isLoading || current.position.sideToMove != current.localColor -> current
 
@@ -396,6 +434,7 @@ class GameViewViewModel(
                 selected != null && square in current.legalTargets -> {
                     val preMoveFen = board.position.fen
                     val move = board.move(pieceAt = selected, to = square)
+                    move?.let { lastMove = it }
                     // A pawn reaching the last rank leaves the board mid-move: hold the move back
                     // until onPromotionSelected completes it, so its LAN carries the chosen piece.
                     val pending = move
@@ -448,6 +487,7 @@ class GameViewViewModel(
         // Completing and sending happen outside `update`, whose lambda can re-run under
         // contention with the socket coroutine — neither is safe to do twice.
         val completed = board.completePromotion(pending.move, kind)
+        lastMove = completed
         submitMove(completed, pending.preMoveFen, current.playerId)
 
         _state.update {
@@ -554,7 +594,7 @@ class GameViewViewModel(
 
     fun acceptDraw() {
         if (_state.value.drawOffer !is DrawOffer.Incoming) return
-        applyTerminal(GameOutcome.DrawAgreed)
+        applyAgreedDraw()
         sendGameAction(LiveAction.INTENT_ACCEPT_DRAW)
     }
 
@@ -575,8 +615,12 @@ class GameViewViewModel(
     }
 
     fun confirmResign() {
-        if (!_state.value.canResign) return
-        applyTerminal(GameOutcome.WeResigned)
+        val current = _state.value
+        if (!current.canResign) return
+        // Through the same path an opponent's resignation takes, with our own id: the outcome
+        // names the color that gave up, so which side of the socket it arrived from doesn't
+        // matter. canResign has already established we hold a seat.
+        current.playerId?.let { applyResignation(it) } ?: return
         sendGameAction(LiveAction.INTENT_RESIGN)
     }
 
@@ -682,11 +726,10 @@ private fun GameScreen(
                 .background(LightThemeTokens.colors.background),
         ) {
             when {
-                // A finished game has nothing left to decide, share or play. applyTerminal
-                // clears both overlays anyway, so this is belt-and-braces — but it means no
-                // frame can paint a stale pane over a result.
-                state.isGameOver -> GameOverPane(state = state, onBack = actions.onBack)
-
+                // A finished game gets no pane of its own: GameContent already presents the
+                // ending on the nav bar with an arrow along the move it ended on, and the board
+                // is the thing worth looking at. endedGame() takes the overlays down for it.
+                //
                 // The notifications pane outranks the share one: it can be holding a decision
                 // that's freezing the board, while share is only ever opened deliberately.
                 state.notifications !is GameViewViewModel.Notifications.Hidden -> NotificationsPane(
@@ -710,10 +753,10 @@ private fun ColumnScope.GameContent(
     state: GameViewViewModel.State,
     actions: GameActions,
 ) {
-    // It's the opponent's turn whenever the side to move isn't the color this device plays.
-    // Surfaced as a second line in the nav bar rather than a dedicated strip, so it costs no
-    // vertical space of its own (the bar reserves its height regardless).
-    val waiting = !state.isLoading && state.position.sideToMove != state.localColor
+    // It's the opponent's turn whenever the side to move isn't the color this device plays —
+    // but a finished game isn't waiting on anyone.
+    val outcome = state.outcome
+    val waiting = !state.isLoading && outcome == null && state.position.sideToMove != state.localColor
 
     LightTopBar(
         leftButton = LightBarButton.LightIcon(
@@ -721,10 +764,15 @@ private fun ColumnScope.GameContent(
             onClick = actions.onBack,
             contentDescription = "Back to games",
         ),
-        // Whatever is waiting on the player outranks `waiting`, which is otherwise a flat lie
-        // mid-promotion: chesskit flips the side to move the instant the pawn lands, so the bar
-        // would read "Waiting for opponent…" while it is really waiting for you.
+        // How the game ended, what's waiting on the player, and whose turn it is all share the nav
+        // bar's second line rather than each getting a strip of their own — the bar reserves its
+        // height regardless, so none of them costs the board any vertical space.
+        //
+        // The pending lines outrank `waiting`, which is otherwise a flat lie mid-promotion:
+        // chesskit flips the side to move the instant the pawn lands, so the bar would read
+        // "Waiting for opponent…" while it is really waiting for you.
         center = when {
+            outcome != null -> LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = outcome.label)
             state.promotion is GameViewViewModel.Promotion.Pending ->
                 LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Pick a piece to finish")
             state.drawOffer is DrawOffer.Incoming ->
@@ -733,12 +781,14 @@ private fun ColumnScope.GameContent(
                 LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Waiting for opponent…")
             else -> LightTopBarCenter.Text("Game")
         },
-        // The bar has one right slot, and the two buttons that want it are near enough mutually
-        // exclusive: a draw needs an opponent, and the invite button exists precisely because
-        // there isn't one yet. The exception is worth spelling out — white can play, and
+        // The bar has one right slot and three claims on it. A finished game takes neither button:
+        // there's nothing left to decide, and a game someone resigned out of can still have an
+        // empty seat but no one worth inviting into it. Otherwise the bell and the invite are near
+        // enough mutually exclusive — a draw needs an opponent, and the invite exists precisely
+        // because there isn't one yet. The exception is worth spelling out: white can play, and
         // promote, before anyone joins, and a pane you can't re-open is a dead end.
         rightButton = when {
-            state.isLoading -> null
+            state.isLoading || outcome != null -> null
             state.hasPendingNotification || !state.hasOpenSeat -> LightBarButton.LightIcon(
                 icon = LightIcons.ALARM,
                 onClick = actions.onToggleNotifications,
@@ -756,18 +806,9 @@ private fun ColumnScope.GameContent(
         },
     )
 
-    BoardBody(state = state, onSquareTap = actions.onSquareTap)
-}
-
-// The board itself, sized to the smaller of the available width/height so the full 8×8 always
-// fits below the nav bar, whatever the device's proportions — the board no longer assumes it can
-// be a full-screen-width square. Pinned to the bottom so any slack falls as flexible breathing
-// room between the board and the nav bar. Shared with the finished-game screen.
-@Composable
-private fun ColumnScope.BoardBody(
-    state: GameViewViewModel.State,
-    onSquareTap: (Square) -> Unit,
-) {
+    // Size the board to the smaller of the available width/height so the full 8×8 always fits
+    // below the nav bar, whatever the device's proportions. Pin it to the bottom so any slack
+    // falls as flexible breathing room between the board and the nav bar.
     BoxWithConstraints(
         modifier = Modifier
             .weight(1f)
@@ -781,17 +822,19 @@ private fun ColumnScope.BoardBody(
                 modifier = Modifier.align(Alignment.Center),
             )
         } else {
-            // Tapping a square is a no-op while it's not our turn
-            // (GameViewViewModel.onSquareTapped guards on sideToMove),
-            // so the board can stay on screen instead of being swapped for text.
+            // Tapping a square is a no-op while it's not our turn, and once the game is over
+            // (GameViewViewModel.onSquareTapped guards on both), so the board can stay on screen
+            // instead of being swapped for text.
             ChessBoard(
                 position = state.position,
                 selectedSquare = state.selectedSquare,
                 legalTargets = state.legalTargets,
-                onSquareTap = onSquareTap,
+                onSquareTap = actions.onSquareTap,
                 orientation = state.localColor,
                 boardSize = minOf(maxWidth, maxHeight),
                 checkedKingSquare = state.checkedKingSquare,
+                // The arrow points out the move it ended on — during play the board stays clean.
+                lastMove = state.lastMove.takeIf { outcome != null },
             )
         }
     }
@@ -942,27 +985,6 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     )
 }
 
-// A finished game: the final position, frozen, under the result. The board stays on screen —
-// it's the thing worth looking at — and the only action left is leaving.
-@Composable
-private fun ColumnScope.GameOverPane(state: GameViewViewModel.State, onBack: () -> Unit) {
-    LightTopBar(
-        leftButton = LightBarButton.LightIcon(
-            icon = LightIcons.BACK,
-            onClick = onBack,
-            contentDescription = "Back to games",
-        ),
-        center = LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.outcome.label),
-    )
-
-    BoardBody(state = state, onSquareTap = {})
-
-    LightBottomBar(
-        items = listOf(
-            LightBarButton.Text(text = "BACK TO GAMES", onClick = onBack),
-        ),
-    )
-}
 
 @Composable
 private fun ColumnScope.CenteredMessage(text: String) {
@@ -1028,7 +1050,7 @@ private fun promotingState(): GameViewViewModel.State {
 private fun playedGameState(): GameViewViewModel.State {
     val board = Board()
     board.move(pieceAt = Square.e2, to = Square.e4)
-    board.move(pieceAt = Square.e7, to = Square.e5)
+    val last = board.move(pieceAt = Square.e7, to = Square.e5)!!
 
     return GameViewViewModel.State(
         position = board.position,
@@ -1037,6 +1059,7 @@ private fun playedGameState(): GameViewViewModel.State {
         playerId = "us",
         whitePlayerId = "us",
         blackPlayerId = "them",
+        lastMove = last.start to last.end,
     )
 }
 
@@ -1051,6 +1074,41 @@ private fun checkedState(): GameViewViewModel.State {
         localColor = Piece.Color.black,
         isLoading = false,
         checkedKingSquare = checkedKingSquare(board.state, board.position),
+    )
+}
+
+// The two ways a game ends, both built from a real board so the arrow and the outcome line come
+// from the same code the screen runs. Fool's mate leaves black's queen on h4 — a long diagonal
+// arrow across the board — with the mated white king underlined on e1.
+private fun matedState(): GameViewViewModel.State {
+    val board = Board()
+    var last: Move? = null
+    for (lan in listOf("f2f3", "e7e5", "g2g4", "d8h4")) {
+        last = board.move(pieceAt = Square(lan.substring(0, 2)), to = Square(lan.substring(2, 4)))
+    }
+
+    return GameViewViewModel.State(
+        position = board.position,
+        localColor = Piece.Color.white,
+        isLoading = false,
+        checkedKingSquare = checkedKingSquare(board.state, board.position),
+        lastMove = last!!.let { it.start to it.end },
+        outcome = gameOutcome(board.state, resignedColor = null),
+    )
+}
+
+// A resignation instead: the position is unremarkable and nobody is in check, so the nav bar's
+// second line is the only thing saying the game is over — and there's still a last move to point at.
+private fun resignedState(): GameViewViewModel.State {
+    val board = Board()
+    val move = board.move(pieceAt = Square.e2, to = Square.e4)!!
+
+    return GameViewViewModel.State(
+        position = board.position,
+        localColor = Piece.Color.white,
+        isLoading = false,
+        lastMove = move.start to move.end,
+        outcome = gameOutcome(board.state, resignedColor = Piece.Color.black),
     )
 }
 
@@ -1118,21 +1176,21 @@ private fun PreviewGameViewResignConfirm(
     )
 }
 
-// The two ways a game can now end, both showing the final position under the result.
+// The one ending chesskit can't see coming, so the only one that needs agreement passed in: an
+// ordinary position, nobody in check, and the nav bar's second line the only thing saying it's
+// over. Checkmate and resignation have previews of their own above.
 @Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
 @Composable
 private fun PreviewGameViewDrawAgreed(
     @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
 ) {
-    GameScreen(state = playedGameState().copy(outcome = GameOutcome.DrawAgreed), colors = colors)
-}
-
-@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
-@Composable
-private fun PreviewGameViewOpponentResigned(
-    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
-) {
-    GameScreen(state = playedGameState().copy(outcome = GameOutcome.TheyResigned), colors = colors)
+    val played = playedGameState()
+    GameScreen(
+        state = played.copy(
+            outcome = gameOutcome(Board.State.active, resignedColor = null, agreedDraw = true),
+        ),
+        colors = colors,
+    )
 }
 
 // The board with the king in check: a line along the bottom edge of that one square. It renders at
@@ -1143,4 +1201,23 @@ private fun PreviewGameViewInCheck(
     @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
 ) {
     GameScreen(state = checkedState(), colors = colors)
+}
+
+// A game that ended in mate: "Checkmate, black won" on the nav bar's second line, an arrow along
+// the move that delivered it, and the mated king still underlined beneath it.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewCheckmated(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(state = matedState(), colors = colors)
+}
+
+// The same presentation for a game someone resigned, where the board itself gives nothing away.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewResigned(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(state = resignedState(), colors = colors)
 }

@@ -15,11 +15,6 @@ data class Game(
     val updatedAt: String,
 )
 
-/** Statuses the backend uses for a game that's still in progress; anything else is over. */
-private val activeGameStatuses = setOf("active", "waitingForOpponent")
-
-val Game.isActive: Boolean get() = status in activeGameStatuses
-
 /**
  * The raw backend status rendered for humans — `waitingForOpponent` is no way to talk to
  * someone. `active` only means "in progress", so it's resolved against [playerId] into whose
@@ -91,8 +86,9 @@ data class Move(
     val id: String,
     // The four game actions the backend records as move-log entries rather than on the game
     // itself. At most one is set on any entry, and an entry that sets one carries no [lan] —
-    // the actor's id is the whole payload. Optional so bodies written before this build (and
-    // the plain moves that make up most of a log) still decode.
+    // the actor's id is the whole payload, and the only record of *who* acted (the game's status
+    // just says `resigned` or `draw`). See List<Move>.resignedColor and gameActionState. Optional
+    // so bodies written before this build — and the plain moves that make up most of a log — decode.
     val drawOfferPlayerID: String? = null,
     val drawAcceptPlayerID: String? = null,
     val drawDeclinePlayerID: String? = null,

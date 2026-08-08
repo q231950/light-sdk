@@ -21,61 +21,37 @@ sealed interface DrawOffer {
     data object Declined : DrawOffer
 }
 
-/** How the game ended. Anything but [InPlay] is terminal: no more moves, no more offers. */
-sealed interface GameOutcome {
-    data object InPlay : GameOutcome
-    data object DrawAgreed : GameOutcome
-    data object WeResigned : GameOutcome
-    data object TheyResigned : GameOutcome
-}
-
-/** The result line shown on the finished-game screen. */
-internal val GameOutcome.label: String
-    get() = when (this) {
-        GameOutcome.InPlay -> ""
-        GameOutcome.DrawAgreed -> "Draw agreed"
-        GameOutcome.WeResigned -> "You resigned"
-        GameOutcome.TheyResigned -> "Opponent resigned"
-    }
-
-/** What a game's move log says about draw offers and how (or whether) it ended. */
+/**
+ * What a game's move log says about draws.
+ *
+ * How a game *ended* is [GameOutcome]'s job, which reads chesskit's verdict on the board — but an
+ * agreed draw is invisible there (no move produces it), so it has to be carried out of the log
+ * alongside the offer's standing and handed to [gameOutcome].
+ */
 internal data class GameActionState(
     val drawOffer: DrawOffer = DrawOffer.None,
-    val outcome: GameOutcome = GameOutcome.InPlay,
+    val agreedDraw: Boolean = false,
 )
 
 /**
- * Reads a game's draw/resign standing out of its move log, as [localPlayerId] sees it.
+ * Reads a game's draw standing out of its move log, as [localPlayerId] sees it.
  *
- * Draw offers and resignations are recorded as move-log entries with no LAN and one actor id,
- * so this is the only way to recover them after a restart or a re-sync — the live socket alone
- * only reports what arrives while we're connected. [moves] must already be ordered (see
- * `GameViewViewModel.loadExistingGame`, which sorts by move number then timestamp: a draw entry
- * shares its number with the real move that follows it, so the number alone doesn't order a log).
+ * Draw offers and their replies are recorded as move-log entries with no LAN and one actor id, so
+ * this is the only way to recover them after a restart or a re-sync — the live socket alone only
+ * reports what arrives while we're connected. [moves] must already be ordered (see
+ * `GameViewViewModel.loadExistingGame`).
  *
- * Our own actions come back in the log too, which is why the actor of each entry is compared
- * with [samePlayer] — the server echoes ids uppercase — to tell an offer we're waiting on from
- * one we owe an answer to.
+ * Our own actions come back in the log too, which is why the actor of each entry is compared with
+ * [samePlayer] — the server echoes ids uppercase — to tell an offer we're waiting on from one we
+ * owe an answer to.
  *
  * An offer only stands while it's the *last* entry: under FIDE rules an offer lapses once the
  * opponent replies or plays, and both of those append an entry after it.
  */
 internal fun gameActionState(moves: List<Move>, localPlayerId: String?): GameActionState {
-    // Terminal states first, and from anywhere in the log rather than just the tail: a game that
-    // ended can't be un-ended by whatever the server happens to have recorded afterwards.
-    moves.lastOrNull { it.resignPlayerID != null }?.let { entry ->
-        return GameActionState(
-            outcome = if (samePlayer(entry.resignPlayerID, localPlayerId)) {
-                GameOutcome.WeResigned
-            } else {
-                GameOutcome.TheyResigned
-            },
-        )
-    }
-    // A draw is agreed whoever accepted it, so the acceptor's identity doesn't matter here.
-    if (moves.any { it.drawAcceptPlayerID != null }) {
-        return GameActionState(outcome = GameOutcome.DrawAgreed)
-    }
+    // An agreed draw ends the game whoever accepted, so the acceptor's identity doesn't matter —
+    // and it settles the offer that produced it, leaving nothing outstanding to answer.
+    if (moves.any { it.drawAcceptPlayerID != null }) return GameActionState(agreedDraw = true)
 
     val last = moves.lastOrNull() ?: return GameActionState()
     last.drawOfferPlayerID?.let { offerer ->

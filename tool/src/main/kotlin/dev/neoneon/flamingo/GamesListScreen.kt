@@ -163,12 +163,12 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                                         game = game,
                                         playerId = current.playerId,
                                         modifier = Modifier
+                                            // Finished games open in the same screen as active
+                                            // ones — GameView replays the move log, so it's the
+                                            // only place that can tell a checkmate from an
+                                            // ordinary position, and it presents the ending.
                                             .clickable {
-                                                if (game.isActive) {
-                                                    navigateTo(screenFactory = { GameView(it, game.id) })
-                                                } else {
-                                                    navigateTo(screenFactory = { GameDetailScreen(it, game.id) })
-                                                }
+                                                navigateTo(screenFactory = { GameView(it, game.id) })
                                             }
                                             .padding(vertical = 0.75f.gridUnitsAsDp()),
                                     )
