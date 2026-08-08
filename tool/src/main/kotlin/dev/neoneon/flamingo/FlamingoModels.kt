@@ -15,11 +15,6 @@ data class Game(
     val updatedAt: String,
 )
 
-/** Statuses the backend uses for a game that's still in progress; anything else is over. */
-private val activeGameStatuses = setOf("active", "waitingForOpponent")
-
-val Game.isActive: Boolean get() = status in activeGameStatuses
-
 /**
  * The raw backend status rendered for humans — `waitingForOpponent` is no way to talk to
  * someone. `active` only means "in progress", so it's resolved against [playerId] into whose
@@ -89,6 +84,9 @@ data class Move(
     val fenAfter: String,
     val timestamp: String,
     val id: String,
+    // Set on the log entry a resignation writes, naming the player who gave up. It's the only
+    // record of *who* resigned: the game's status just says `resigned`. See List<Move>.resignedColor.
+    val resignPlayerID: String? = null,
 )
 
 @Serializable
