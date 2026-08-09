@@ -71,6 +71,31 @@ class GameOutcomeTest {
     }
 
     @Test
+    fun anAgreementEndsAnOtherwiseUnremarkablePosition() {
+        // Like a resignation, agreeing writes no move — chesskit sees a live board and would
+        // report no outcome at all, so agreement has to be carried in beside it.
+        val board = boardAfter("e2e4")
+
+        assertEquals(Board.State.active, board.state)
+        assertNull(gameOutcome(board.state, resignedColor = null, agreedDraw = false))
+        assertEquals(
+            GameOutcome.Drawn(Board.State.DrawReason.agreement),
+            gameOutcome(board.state, resignedColor = null, agreedDraw = true),
+        )
+    }
+
+    @Test
+    fun aResignationOutranksAnAgreement() {
+        // A game can only be given up once; whichever of the two came second didn't happen.
+        val board = boardAfter("e2e4")
+
+        assertEquals(
+            GameOutcome.Resigned(Piece.Color.black),
+            gameOutcome(board.state, resignedColor = Piece.Color.black, agreedDraw = true),
+        )
+    }
+
+    @Test
     fun aResignationEndsAnOtherwiseUnremarkablePosition() {
         // The resign log entry carries no move, so the board is still active when it happens —
         // the outcome can only come from the resigning color.
