@@ -12,7 +12,11 @@ import kotlinx.serialization.Serializable
  *
  * `{ "intent": "move", "player": "<uuid>", "lan": "e2e4", "fen": "<pre-move FEN>", "n": 3 }`
  *
- * `lan`/`fen`/`n` are present for moves; draw/resign frames omit them.
+ * `lan` is present only for moves. `fen` and `n` travel on every frame, draw/resign
+ * included, so the live path writes the same server history as the HTTP one (the iOS
+ * companion's `LiveAction(payload:)` does the same — its own KDoc claiming otherwise is
+ * stale). For a draw/resign frame `fen` is the current position and `n` is the half-move
+ * number the actor would have played next.
  */
 @Serializable
 data class LiveAction(

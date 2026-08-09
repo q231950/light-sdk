@@ -84,8 +84,14 @@ data class Move(
     val fenAfter: String,
     val timestamp: String,
     val id: String,
-    // Set on the log entry a resignation writes, naming the player who gave up. It's the only
-    // record of *who* resigned: the game's status just says `resigned`. See List<Move>.resignedColor.
+    // The four game actions the backend records as move-log entries rather than on the game
+    // itself. At most one is set on any entry, and an entry that sets one carries no [lan] —
+    // the actor's id is the whole payload, and the only record of *who* acted (the game's status
+    // just says `resigned` or `draw`). See List<Move>.resignedColor and gameActionState. Optional
+    // so bodies written before this build — and the plain moves that make up most of a log — decode.
+    val drawOfferPlayerID: String? = null,
+    val drawAcceptPlayerID: String? = null,
+    val drawDeclinePlayerID: String? = null,
     val resignPlayerID: String? = null,
 )
 

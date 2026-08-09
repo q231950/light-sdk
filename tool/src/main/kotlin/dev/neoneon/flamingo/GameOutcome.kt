@@ -16,16 +16,22 @@ sealed interface GameOutcome {
 /**
  * The game's ending, or `null` while it's still being played.
  *
- * [resignedColor] takes precedence over [boardState]: a player may resign from any position, and
- * the server's resign log entry carries no move (its `lan` is null, so `replayMove` skips it),
- * leaving the board looking perfectly active at the moment someone gave up.
+ * [resignedColor] and [agreedDraw] take precedence over [boardState], for the same reason: neither
+ * is a move. The server records both as log entries carrying no LAN (so `replayMove` skips them),
+ * leaving the board looking perfectly active at the moment the players stopped. Resignation wins
+ * over agreement because a game can only be given up once, and whichever came second didn't happen.
  *
  * Everything else is read off chesskit's own verdict. That means [boardState] must come from a
  * board advanced *by moves* — the same constraint [checkedKingSquare] documents, and the reason
  * this takes a `Board.State` rather than a position.
  */
-internal fun gameOutcome(boardState: Board.State, resignedColor: Piece.Color?): GameOutcome? {
+internal fun gameOutcome(
+    boardState: Board.State,
+    resignedColor: Piece.Color?,
+    agreedDraw: Boolean = false,
+): GameOutcome? {
     if (resignedColor != null) return GameOutcome.Resigned(resignedColor)
+    if (agreedDraw) return GameOutcome.Drawn(Board.State.DrawReason.agreement)
 
     return when (boardState) {
         // chesskit names the *mated* color, so the winner is the other one.
