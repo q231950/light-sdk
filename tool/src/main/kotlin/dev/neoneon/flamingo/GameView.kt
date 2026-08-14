@@ -64,7 +64,6 @@ class GameViewViewModel(
     private var board = Board()
     private val api = FlamingoApi()
     private val transport: LiveTransport = KtorLiveTransport(viewModelScope)
-    private var moveCount = 0
     private var hasLoadedInitialState = false
 
     // The move the board is currently sitting on, and the two ways a game can end that leave no
@@ -121,7 +120,6 @@ class GameViewViewModel(
         val legalTargets: Set<Square> = emptySet(),
         val isLoading: Boolean = true,
         val playerId: String? = null,
-        val moveCount: Int = 0,
         // Seat occupancy from the server record. A null seat means the game is still open for a
         // friend to join, so it can be shared; both stay null until the first load completes.
         val whitePlayerId: String? = null,
@@ -220,14 +218,14 @@ class GameViewViewModel(
         var blackId: String? = _state.value.blackPlayerId
         var actions = GameActionState(_state.value.drawOffer, agreedDraw)
         api.fetchGame(gameId).onSuccess { detail ->
-            // Numbers are unique per entry in a log this client wrote, but the iOS companion
-            // derives them from the FEN and so can reuse one after a draw offer. The ISO-8601
-            // timestamp breaks that tie; the sort is stable beyond it.
+            // A draw or resign entry shares the number of the move it precedes, so the number
+            // alone doesn't order the log. The ISO-8601 timestamp breaks that tie — an action is
+            // always written before the move answering it — and the sort is stable beyond it.
+            // This is the order the backend serves too (see GameController.allMoves).
             val sorted = detail.moves.sortedWith(compareBy({ it.moveNumber }, { it.timestamp }))
             board = Board()
             lastMove = null
             sorted.forEach { replayMove(it) }
-            moveCount = lastLogEntryNumber(sorted)
             actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
             blackId = detail.game.blackPlayerID
@@ -248,7 +246,6 @@ class GameViewViewModel(
                 localColor = resolvedColor,
                 isLoading = false,
                 playerId = playerId,
-                moveCount = moveCount,
                 whitePlayerId = whiteId,
                 blackPlayerId = blackId,
                 drawOffer = actions.drawOffer,
@@ -307,10 +304,8 @@ class GameViewViewModel(
     // that did carry our own id can't be mistaken for theirs and demand an answer.
     private fun applyIncoming(action: LiveAction) {
         val mine = samePlayer(action.player, _state.value.playerId)
-        // Every action takes a log entry of its own, draws and resignations included, so every
-        // one of them advances the sequence — see lastLogEntryNumber for why reusing a number
-        // would have the server swallow whatever we send next.
-        action.n?.let { if (it > moveCount) moveCount = it }
+        // `action.n` needs no tracking: every number we send is derived from the position the
+        // frame leaves us on, so there is no running sequence to keep in step. See halfMoveNumber.
 
         when (action.intent) {
             LiveAction.INTENT_MOVE -> applyIncomingMove(action)
@@ -353,7 +348,6 @@ class GameViewViewModel(
             it.withCurrentBoard().copy(
                 selectedSquare = null,
                 legalTargets = emptySet(),
-                moveCount = moveCount,
             )
         }
     }
@@ -444,8 +438,7 @@ class GameViewViewModel(
                     current.withCurrentBoard().copy(
                         selectedSquare = null,
                         legalTargets = emptySet(),
-                        moveCount = moveCount,
-                        promotion = pending ?: Promotion.Hidden,
+                                promotion = pending ?: Promotion.Hidden,
                         drawOffer = if (move != null) {
                             current.drawOffer.clearedByOurMove()
                         } else {
@@ -496,7 +489,6 @@ class GameViewViewModel(
                 drawOffer = it.drawOffer.clearedByOurMove(),
             )
             resolved.withCurrentBoard().copy(
-                moveCount = moveCount,
                 // An offer can land while the picker is up — our side has already moved as far
                 // as chesskit is concerned — so only close the pane if nothing else is waiting.
                 notifications = if (resolved.hasPendingNotification) {
@@ -514,8 +506,8 @@ class GameViewViewModel(
     // white's move 1) and broadcasts it to the opponent. The pre-move `fen` is sent so
     // the server stores the FEN each move was played *from*, matching the existing protocol.
     private fun submitMove(move: Move, preMoveFen: String, playerId: String?) {
-        moveCount += 1
-        val moveNumber = moveCount
+        // The pre-move position names the ply being played, so it is also its number.
+        val moveNumber = halfMoveNumber(preMoveFen)
 
         viewModelScope.launch(Dispatchers.IO) {
             val callerPlayerId = playerId ?: identityStore.getOrCreate()
@@ -544,15 +536,14 @@ class GameViewViewModel(
      * history the HTTP one would. `fen` is the current position, there being no move for it to
      * be "pre".
      *
-     * `n` is the next free log number, so this advances [moveCount] exactly as [submitMove]
-     * does. The iOS companion instead derives `n` from the FEN, which leaves an accept carrying
-     * the same number as the offer it answers — and the recorder, being idempotent per number,
-     * silently drops it (see [lastLogEntryNumber]).
+     * `n` comes from that current position, so an action takes the number of the move it precedes
+     * and shares that slot with it — and with any other action answering the same offer. The
+     * backend keeps one row per *played* ply and lets actions sit alongside, telling them apart by
+     * their actor, so nothing here is swallowed. See [halfMoveNumber].
      */
     private fun sendGameAction(intent: String) {
         val fen = board.position.fen
-        moveCount += 1
-        val moveNumber = moveCount
+        val moveNumber = halfMoveNumber(fen)
         val playerId = _state.value.playerId
 
         viewModelScope.launch(Dispatchers.IO) {
