@@ -137,7 +137,17 @@ class GameViewViewModel(
         // by the bell, the pane's back button, or the decision being made.
         val notifications: Notifications = Notifications.Hidden,
         val drawOffer: DrawOffer = DrawOffer.None,
+        // Where the player has stepped to in a finished game, and how many positions there are to
+        // step through. Count is 0 while the game is on — there is nothing to replay yet.
+        val frameIndex: Int = 0,
+        val frameCount: Int = 0,
     ) {
+        /** A finished game with more than its opening position is worth stepping through. */
+        val canReplay: Boolean get() = outcome != null && frameCount > 1
+
+        /** `0` is the opening position; the rest are numbered by the move that produced them. */
+        val replayLabel: String get() = if (frameIndex == 0) "Start" else "Move $frameIndex of ${frameCount - 1}"
+
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
 
@@ -164,15 +174,61 @@ class GameViewViewModel(
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
 
+    /** One position the game stood in, with what the board should show alongside it. */
+    private data class Frame(
+        val position: Position,
+        val lastMove: Pair<Square, Square>?,
+        val checkedKingSquare: Square?,
+    )
+
+    // Every position the game has stood in, oldest first. Recorded at the one point every board
+    // advance publishes through, so the four sites that move a piece need no bookkeeping of their
+    // own; re-entrant or repeated publishes are absorbed by the FEN check in [recordFrame].
+    private val frames = mutableListOf<Frame>()
+    private var frameIndex = 0
+
     // Every publish of a new board position goes through this, so the check marker, the last move
     // and the outcome can't be forgotten at one of the sites that advance the board (initial load,
     // incoming move, local move, promotion).
-    private fun State.withCurrentBoard(): State = copy(
-        position = board.position,
-        checkedKingSquare = checkedKingSquare(board.state, board.position),
-        lastMove = this@GameViewViewModel.lastMove?.let { it.start to it.end },
-        outcome = gameOutcome(board.state, resignedColor, agreedDraw),
-    )
+    private fun State.withCurrentBoard(): State {
+        recordFrame()
+        val outcome = gameOutcome(board.state, resignedColor, agreedDraw)
+        // A finished game is read, not played: the board shows whichever frame the player has
+        // stepped to. While the game is on there is only ever one frame worth showing — the
+        // current one — so the live path is unchanged.
+        val frame = if (outcome != null) frames.getOrNull(frameIndex) else null
+        return copy(
+            position = frame?.position ?: board.position,
+            checkedKingSquare = frame?.checkedKingSquare ?: checkedKingSquare(board.state, board.position),
+            lastMove = frame?.lastMove ?: this@GameViewViewModel.lastMove?.let { it.start to it.end },
+            outcome = outcome,
+            frameIndex = frameIndex,
+            frameCount = if (outcome != null) frames.size else 0,
+        )
+    }
+
+    // Appends the board's current position, unless it is already the newest frame — which is the
+    // common case, since most publishes change something other than the position (a selection, a
+    // notification) and StateFlow.update may run its lambda more than once.
+    private fun recordFrame() {
+        if (frames.lastOrNull()?.position?.fen == board.position.fen) return
+        frames += Frame(
+            position = board.position,
+            lastMove = lastMove?.let { it.start to it.end },
+            checkedKingSquare = checkedKingSquare(board.state, board.position),
+        )
+        // Stay pinned to the newest frame while the game is still being played, so a game that
+        // ends is already showing the position it ended on.
+        frameIndex = frames.lastIndex
+    }
+
+    /** Steps the finished-game board one position back or forward, stopping at either end. */
+    fun onStepReplay(forward: Boolean) {
+        val target = (frameIndex + if (forward) 1 else -1).coerceIn(0, frames.lastIndex.coerceAtLeast(0))
+        if (target == frameIndex) return
+        frameIndex = target
+        _state.update { it.withCurrentBoard() }
+    }
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
@@ -225,6 +281,10 @@ class GameViewViewModel(
             val sorted = detail.moves.sortedWith(compareBy({ it.moveNumber }, { it.timestamp }))
             board = Board()
             lastMove = null
+            // The board is rebuilt from scratch here, so the replay is too — starting from the
+            // opening position, which no move produced and nothing else would record.
+            frames.clear()
+            recordFrame()
             sorted.forEach { replayMove(it) }
             actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
@@ -398,6 +458,11 @@ class GameViewViewModel(
                 lastMove = board.completePromotion(move, kind)
             }
         }
+
+        // The replay is built here rather than at the single publish point, because this runs in
+        // a loop that publishes once at the end — by which time every intermediate position the
+        // player wants to step back through is already gone.
+        recordFrame()
     }
 
     // Taps only move our own pieces: they're ignored unless it's this device's
@@ -676,6 +741,7 @@ class GameView(
                 onRequestResign = { viewModel.requestResign() },
                 onCancelResign = { viewModel.cancelResign() },
                 onConfirmResign = { viewModel.confirmResign() },
+                onStepReplay = { viewModel.onStepReplay(it) },
             ),
         )
     }
@@ -699,6 +765,7 @@ private data class GameActions(
     val onRequestResign: () -> Unit = {},
     val onCancelResign: () -> Unit = {},
     val onConfirmResign: () -> Unit = {},
+    val onStepReplay: (Boolean) -> Unit = {},
 )
 
 // The whole screen, driven only by [state] and callbacks so every state it can be in — a pending
@@ -763,6 +830,10 @@ private fun ColumnScope.GameContent(
         // chesskit flips the side to move the instant the pawn lands, so the bar would read
         // "Waiting for opponent…" while it is really waiting for you.
         center = when {
+            // Once the player steps off the final position the outcome is no longer what the
+            // board shows, so the line reports where they are instead of restating the result.
+            outcome != null && state.frameIndex != state.frameCount - 1 ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.replayLabel)
             outcome != null -> LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = outcome.label)
             state.promotion is GameViewViewModel.Promotion.Pending ->
                 LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Pick a piece to finish")
@@ -824,10 +895,23 @@ private fun ColumnScope.GameContent(
                 orientation = state.localColor,
                 boardSize = minOf(maxWidth, maxHeight),
                 checkedKingSquare = state.checkedKingSquare,
-                // The arrow points out the move it ended on — during play the board stays clean.
+                // The arrow points out the move the board is sitting on. During play it stays
+                // clean; stepping back through a finished game it follows each move in turn.
                 lastMove = state.lastMove.takeIf { outcome != null },
             )
         }
+    }
+
+    // A finished game has nothing to decide and no turn to wait for, so the bar the live game
+    // never uses is free to step through it. The label sits on the buttons' own row rather than
+    // taking height from the board.
+    if (state.canReplay) {
+        LightBottomBar(
+            items = listOf(
+                LightBarButton.Text(text = "PREV", onClick = { actions.onStepReplay(false) }),
+                LightBarButton.Text(text = "NEXT", onClick = { actions.onStepReplay(true) }),
+            ),
+        )
     }
 }
 
