@@ -140,27 +140,32 @@ class GameActionsTest {
     }
 
     @Test
-    fun lastLogEntryNumberCountsDrawAndResignEntries() {
-        // The one that matters: an offer at 4 must push the reply to 5. Numbering the reply 4
-        // would have the recorder treat it as a replay of the offer and write nothing.
-        val moves = listOf(entry(1), entry(2), entry(3), offer(4, by = THEM))
-
-        assertEquals(4, lastLogEntryNumber(moves))
+    fun halfMoveNumberCountsPliesFromTheOpening() {
+        // White's first move is 1, black's reply 2, white's second 3 — the numbering the iOS
+        // companion and the backend both speak.
+        assertEquals(1, halfMoveNumber("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"))
+        assertEquals(2, halfMoveNumber("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"))
+        assertEquals(3, halfMoveNumber("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2"))
     }
 
     @Test
-    fun lastLogEntryNumberTakesTheHighestWhenAPeerReusedANumber() {
-        // The iOS companion derives its numbers from the FEN, so it can write an offer sharing
-        // a number with the move beside it. We still have to move past the highest one used.
-        val moves = listOf(entry(1), offer(2, by = THEM), entry(2, lan = "e7e5"))
+    fun halfMoveNumberGivesAnActionTheSlotOfTheMoveItPrecedes() {
+        // A draw or resign frame carries the *current* position, so it numbers itself as the move
+        // about to be played — deliberately sharing that slot. The backend keeps one row per
+        // played ply and lets actions sit alongside, so nothing is displaced.
+        val afterQh5 = "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 1 2"
 
-        assertEquals(2, lastLogEntryNumber(moves))
+        assertEquals(4, halfMoveNumber(afterQh5))
+        // …and black's reply, played from that same position, claims the same number.
+        assertEquals(halfMoveNumber(afterQh5), 4)
     }
 
     @Test
-    fun lastLogEntryNumberOfAnEmptyLogIsZero() {
-        assertEquals(0, lastLogEntryNumber(emptyList()))
-        // A game whose only entry is a draw offer has still used number 1.
-        assertEquals(1, lastLogEntryNumber(listOf(offer(1, by = THEM))))
+    fun halfMoveNumberFallsBackToOneOnAnUnreadableFen() {
+        // Matches the companion's fallback rather than throwing: a malformed FEN should not take
+        // the board down mid-game.
+        assertEquals(1, halfMoveNumber(""))
+        assertEquals(1, halfMoveNumber("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"))
+        assertEquals(1, halfMoveNumber("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 x"))
     }
 }

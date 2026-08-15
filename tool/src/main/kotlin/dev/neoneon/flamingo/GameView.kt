@@ -64,7 +64,6 @@ class GameViewViewModel(
     private var board = Board()
     private val api = FlamingoApi()
     private val transport: LiveTransport = KtorLiveTransport(viewModelScope)
-    private var moveCount = 0
     private var hasLoadedInitialState = false
 
     // The move the board is currently sitting on, and the two ways a game can end that leave no
@@ -121,7 +120,6 @@ class GameViewViewModel(
         val legalTargets: Set<Square> = emptySet(),
         val isLoading: Boolean = true,
         val playerId: String? = null,
-        val moveCount: Int = 0,
         // Seat occupancy from the server record. A null seat means the game is still open for a
         // friend to join, so it can be shared; both stay null until the first load completes.
         val whitePlayerId: String? = null,
@@ -139,7 +137,17 @@ class GameViewViewModel(
         // by the bell, the pane's back button, or the decision being made.
         val notifications: Notifications = Notifications.Hidden,
         val drawOffer: DrawOffer = DrawOffer.None,
+        // Where the player has stepped to in a finished game, and how many positions there are to
+        // step through. Count is 0 while the game is on — there is nothing to replay yet.
+        val frameIndex: Int = 0,
+        val frameCount: Int = 0,
     ) {
+        /** A finished game with more than its opening position is worth stepping through. */
+        val canReplay: Boolean get() = outcome != null && frameCount > 1
+
+        /** `0` is the opening position; the rest are numbered by the move that produced them. */
+        val replayLabel: String get() = if (frameIndex == 0) "Start" else "Move $frameIndex of ${frameCount - 1}"
+
         /** Only a game with an unfilled seat has anyone left to invite. */
         val hasOpenSeat: Boolean get() = whitePlayerId == null || blackPlayerId == null
 
@@ -166,15 +174,48 @@ class GameViewViewModel(
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
 
+    // Every position the game has stood in, and where the player has stepped to in it. Recorded at
+    // the one point every board advance publishes through, so the four sites that move a piece need
+    // no bookkeeping of their own; re-entrant or repeated publishes are absorbed by [ReplayLog].
+    private val replay = ReplayLog()
+
+    // The frame the board is standing on right now: its position, the move that produced it, and
+    // the check that move left behind. A plain member rather than something withCurrentBoard builds
+    // inline, so `lastMove` here can only be the view model's — see [ReplayLog] for why that
+    // distinction is load-bearing.
+    private fun currentFrame(): ReplayFrame = ReplayFrame(
+        position = board.position,
+        lastMove = lastMove?.let { it.start to it.end },
+        checkedKingSquare = checkedKingSquare(board.state, board.position),
+    )
+
     // Every publish of a new board position goes through this, so the check marker, the last move
     // and the outcome can't be forgotten at one of the sites that advance the board (initial load,
     // incoming move, local move, promotion).
-    private fun State.withCurrentBoard(): State = copy(
-        position = board.position,
-        checkedKingSquare = checkedKingSquare(board.state, board.position),
-        lastMove = this@GameViewViewModel.lastMove?.let { it.start to it.end },
-        outcome = gameOutcome(board.state, resignedColor, agreedDraw),
-    )
+    private fun State.withCurrentBoard(): State {
+        val live = currentFrame()
+        replay.record(live)
+        val outcome = gameOutcome(board.state, resignedColor, agreedDraw)
+        // A finished game is read, not played: the board shows whichever frame the player has
+        // stepped to, taken whole so the opening position can't be shown under the arrow of the
+        // move that ended the game. While the game is on there is only ever one frame worth
+        // showing — the live one — so the playing path is unchanged.
+        val frame = if (outcome != null) replay.current ?: live else live
+        return copy(
+            position = frame.position,
+            checkedKingSquare = frame.checkedKingSquare,
+            lastMove = frame.lastMove,
+            outcome = outcome,
+            frameIndex = replay.index,
+            frameCount = if (outcome != null) replay.size else 0,
+        )
+    }
+
+    /** Steps the finished-game board one position back or forward, stopping at either end. */
+    fun onStepReplay(forward: Boolean) {
+        if (!replay.step(forward)) return
+        _state.update { it.withCurrentBoard() }
+    }
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
@@ -220,14 +261,18 @@ class GameViewViewModel(
         var blackId: String? = _state.value.blackPlayerId
         var actions = GameActionState(_state.value.drawOffer, agreedDraw)
         api.fetchGame(gameId).onSuccess { detail ->
-            // Numbers are unique per entry in a log this client wrote, but the iOS companion
-            // derives them from the FEN and so can reuse one after a draw offer. The ISO-8601
-            // timestamp breaks that tie; the sort is stable beyond it.
+            // A draw or resign entry shares the number of the move it precedes, so the number
+            // alone doesn't order the log. The ISO-8601 timestamp breaks that tie — an action is
+            // always written before the move answering it — and the sort is stable beyond it.
+            // This is the order the backend serves too (see GameController.allMoves).
             val sorted = detail.moves.sortedWith(compareBy({ it.moveNumber }, { it.timestamp }))
             board = Board()
             lastMove = null
+            // The board is rebuilt from scratch here, so the replay is too — starting from the
+            // opening position, which no move produced and nothing else would record.
+            replay.clear()
+            replay.record(currentFrame())
             sorted.forEach { replayMove(it) }
-            moveCount = lastLogEntryNumber(sorted)
             actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
             blackId = detail.game.blackPlayerID
@@ -248,7 +293,6 @@ class GameViewViewModel(
                 localColor = resolvedColor,
                 isLoading = false,
                 playerId = playerId,
-                moveCount = moveCount,
                 whitePlayerId = whiteId,
                 blackPlayerId = blackId,
                 drawOffer = actions.drawOffer,
@@ -307,10 +351,8 @@ class GameViewViewModel(
     // that did carry our own id can't be mistaken for theirs and demand an answer.
     private fun applyIncoming(action: LiveAction) {
         val mine = samePlayer(action.player, _state.value.playerId)
-        // Every action takes a log entry of its own, draws and resignations included, so every
-        // one of them advances the sequence — see lastLogEntryNumber for why reusing a number
-        // would have the server swallow whatever we send next.
-        action.n?.let { if (it > moveCount) moveCount = it }
+        // `action.n` needs no tracking: every number we send is derived from the position the
+        // frame leaves us on, so there is no running sequence to keep in step. See halfMoveNumber.
 
         when (action.intent) {
             LiveAction.INTENT_MOVE -> applyIncomingMove(action)
@@ -353,7 +395,6 @@ class GameViewViewModel(
             it.withCurrentBoard().copy(
                 selectedSquare = null,
                 legalTargets = emptySet(),
-                moveCount = moveCount,
             )
         }
     }
@@ -404,6 +445,11 @@ class GameViewViewModel(
                 lastMove = board.completePromotion(move, kind)
             }
         }
+
+        // The replay is built here rather than at the single publish point, because this runs in
+        // a loop that publishes once at the end — by which time every intermediate position the
+        // player wants to step back through is already gone.
+        replay.record(currentFrame())
     }
 
     // Taps only move our own pieces: they're ignored unless it's this device's
@@ -444,8 +490,7 @@ class GameViewViewModel(
                     current.withCurrentBoard().copy(
                         selectedSquare = null,
                         legalTargets = emptySet(),
-                        moveCount = moveCount,
-                        promotion = pending ?: Promotion.Hidden,
+                                promotion = pending ?: Promotion.Hidden,
                         drawOffer = if (move != null) {
                             current.drawOffer.clearedByOurMove()
                         } else {
@@ -496,7 +541,6 @@ class GameViewViewModel(
                 drawOffer = it.drawOffer.clearedByOurMove(),
             )
             resolved.withCurrentBoard().copy(
-                moveCount = moveCount,
                 // An offer can land while the picker is up — our side has already moved as far
                 // as chesskit is concerned — so only close the pane if nothing else is waiting.
                 notifications = if (resolved.hasPendingNotification) {
@@ -514,8 +558,8 @@ class GameViewViewModel(
     // white's move 1) and broadcasts it to the opponent. The pre-move `fen` is sent so
     // the server stores the FEN each move was played *from*, matching the existing protocol.
     private fun submitMove(move: Move, preMoveFen: String, playerId: String?) {
-        moveCount += 1
-        val moveNumber = moveCount
+        // The pre-move position names the ply being played, so it is also its number.
+        val moveNumber = halfMoveNumber(preMoveFen)
 
         viewModelScope.launch(Dispatchers.IO) {
             val callerPlayerId = playerId ?: identityStore.getOrCreate()
@@ -544,15 +588,14 @@ class GameViewViewModel(
      * history the HTTP one would. `fen` is the current position, there being no move for it to
      * be "pre".
      *
-     * `n` is the next free log number, so this advances [moveCount] exactly as [submitMove]
-     * does. The iOS companion instead derives `n` from the FEN, which leaves an accept carrying
-     * the same number as the offer it answers — and the recorder, being idempotent per number,
-     * silently drops it (see [lastLogEntryNumber]).
+     * `n` comes from that current position, so an action takes the number of the move it precedes
+     * and shares that slot with it — and with any other action answering the same offer. The
+     * backend keeps one row per *played* ply and lets actions sit alongside, telling them apart by
+     * their actor, so nothing here is swallowed. See [halfMoveNumber].
      */
     private fun sendGameAction(intent: String) {
         val fen = board.position.fen
-        moveCount += 1
-        val moveNumber = moveCount
+        val moveNumber = halfMoveNumber(fen)
         val playerId = _state.value.playerId
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -685,6 +728,7 @@ class GameView(
                 onRequestResign = { viewModel.requestResign() },
                 onCancelResign = { viewModel.cancelResign() },
                 onConfirmResign = { viewModel.confirmResign() },
+                onStepReplay = { viewModel.onStepReplay(it) },
             ),
         )
     }
@@ -708,6 +752,7 @@ private data class GameActions(
     val onRequestResign: () -> Unit = {},
     val onCancelResign: () -> Unit = {},
     val onConfirmResign: () -> Unit = {},
+    val onStepReplay: (Boolean) -> Unit = {},
 )
 
 // The whole screen, driven only by [state] and callbacks so every state it can be in — a pending
@@ -772,6 +817,10 @@ private fun ColumnScope.GameContent(
         // chesskit flips the side to move the instant the pawn lands, so the bar would read
         // "Waiting for opponent…" while it is really waiting for you.
         center = when {
+            // Once the player steps off the final position the outcome is no longer what the
+            // board shows, so the line reports where they are instead of restating the result.
+            outcome != null && state.frameIndex != state.frameCount - 1 ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.replayLabel)
             outcome != null -> LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = outcome.label)
             state.promotion is GameViewViewModel.Promotion.Pending ->
                 LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = "Pick a piece to finish")
@@ -833,10 +882,23 @@ private fun ColumnScope.GameContent(
                 orientation = state.localColor,
                 boardSize = minOf(maxWidth, maxHeight),
                 checkedKingSquare = state.checkedKingSquare,
-                // The arrow points out the move it ended on — during play the board stays clean.
+                // The arrow points out the move the board is sitting on. During play it stays
+                // clean; stepping back through a finished game it follows each move in turn.
                 lastMove = state.lastMove.takeIf { outcome != null },
             )
         }
+    }
+
+    // A finished game has nothing to decide and no turn to wait for, so the bar the live game
+    // never uses is free to step through it. The label sits on the buttons' own row rather than
+    // taking height from the board.
+    if (state.canReplay) {
+        LightBottomBar(
+            items = listOf(
+                LightBarButton.Text(text = "PREV", onClick = { actions.onStepReplay(false) }),
+                LightBarButton.Text(text = "NEXT", onClick = { actions.onStepReplay(true) }),
+            ),
+        )
     }
 }
 

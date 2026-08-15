@@ -67,15 +67,27 @@ internal fun gameActionState(moves: List<Move>, localPlayerId: String?): GameAct
 }
 
 /**
- * The highest entry number in [moves] — the sequence the next entry we write must follow.
+ * The half-move number [fen] belongs to: the ply about to be played from that position.
  *
- * `moveNumber` is a *log* sequence, not a half-move count, and draw/resign entries consume one of
- * their own: the recorder is idempotent per number, returning the stored entry and writing nothing
- * when a number is reused. So an accept numbered the same as the offer it answers is silently
- * swallowed — as is the next real move, if a draw entry is left out of this count. Draw entries
- * therefore push subsequent moves' numbers past their true half-move index, which costs nothing:
- * the number only orders the log and keys that idempotency, while replay works off LAN and the
- * turn is read from the FEN.
+ * `moveNumber` is a half-move index, derived from the position rather than counted from the log —
+ * the same rule the iOS companion and the backend follow, so both clients name a ply identically.
+ * Draw and resign entries carry the *current* position, which makes this the number of the move
+ * they precede: they deliberately share that move's slot, and the backend keeps one row per played
+ * ply while letting actions sit alongside it.
+ *
+ * This client used to number every entry `max + 1` instead, treating the column as an opaque log
+ * sequence. That was self-consistent, but it drifted a slot ahead of the FEN-derived numbering as
+ * soon as both sides acted on one draw offer — and in a mixed game against iOS the drift landed
+ * our move on the number iOS had reserved for the *next* ply, so the backend rejected that ply as
+ * a divergence and dropped it from the history.
+ *
+ * FEN fields: `[position] [side] [castling] [ep] [halfclock] [fullmove]`. White's first move is 1,
+ * black's is 2, white's second is 3. Falls back to 1 on a FEN this can't read, matching the
+ * companion.
  */
-internal fun lastLogEntryNumber(moves: List<Move>): Int =
-    moves.maxOfOrNull { it.moveNumber } ?: 0
+internal fun halfMoveNumber(fen: String): Int {
+    val fields = fen.split(' ')
+    val fullmove = fields.getOrNull(5)?.toIntOrNull() ?: return 1
+    val blackToMove = fields.getOrNull(1) == "b"
+    return (fullmove - 1) * 2 + if (blackToMove) 2 else 1
+}
