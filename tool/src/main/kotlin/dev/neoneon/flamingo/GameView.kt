@@ -174,59 +174,46 @@ class GameViewViewModel(
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
 
-    /** One position the game stood in, with what the board should show alongside it. */
-    private data class Frame(
-        val position: Position,
-        val lastMove: Pair<Square, Square>?,
-        val checkedKingSquare: Square?,
-    )
+    // Every position the game has stood in, and where the player has stepped to in it. Recorded at
+    // the one point every board advance publishes through, so the four sites that move a piece need
+    // no bookkeeping of their own; re-entrant or repeated publishes are absorbed by [ReplayLog].
+    private val replay = ReplayLog()
 
-    // Every position the game has stood in, oldest first. Recorded at the one point every board
-    // advance publishes through, so the four sites that move a piece need no bookkeeping of their
-    // own; re-entrant or repeated publishes are absorbed by the FEN check in [recordFrame].
-    private val frames = mutableListOf<Frame>()
-    private var frameIndex = 0
+    // The frame the board is standing on right now: its position, the move that produced it, and
+    // the check that move left behind. A plain member rather than something withCurrentBoard builds
+    // inline, so `lastMove` here can only be the view model's — see [ReplayLog] for why that
+    // distinction is load-bearing.
+    private fun currentFrame(): ReplayFrame = ReplayFrame(
+        position = board.position,
+        lastMove = lastMove?.let { it.start to it.end },
+        checkedKingSquare = checkedKingSquare(board.state, board.position),
+    )
 
     // Every publish of a new board position goes through this, so the check marker, the last move
     // and the outcome can't be forgotten at one of the sites that advance the board (initial load,
     // incoming move, local move, promotion).
     private fun State.withCurrentBoard(): State {
-        recordFrame()
+        val live = currentFrame()
+        replay.record(live)
         val outcome = gameOutcome(board.state, resignedColor, agreedDraw)
         // A finished game is read, not played: the board shows whichever frame the player has
-        // stepped to. While the game is on there is only ever one frame worth showing — the
-        // current one — so the live path is unchanged.
-        val frame = if (outcome != null) frames.getOrNull(frameIndex) else null
+        // stepped to, taken whole so the opening position can't be shown under the arrow of the
+        // move that ended the game. While the game is on there is only ever one frame worth
+        // showing — the live one — so the playing path is unchanged.
+        val frame = if (outcome != null) replay.current ?: live else live
         return copy(
-            position = frame?.position ?: board.position,
-            checkedKingSquare = frame?.checkedKingSquare ?: checkedKingSquare(board.state, board.position),
-            lastMove = frame?.lastMove ?: this@GameViewViewModel.lastMove?.let { it.start to it.end },
+            position = frame.position,
+            checkedKingSquare = frame.checkedKingSquare,
+            lastMove = frame.lastMove,
             outcome = outcome,
-            frameIndex = frameIndex,
-            frameCount = if (outcome != null) frames.size else 0,
+            frameIndex = replay.index,
+            frameCount = if (outcome != null) replay.size else 0,
         )
-    }
-
-    // Appends the board's current position, unless it is already the newest frame — which is the
-    // common case, since most publishes change something other than the position (a selection, a
-    // notification) and StateFlow.update may run its lambda more than once.
-    private fun recordFrame() {
-        if (frames.lastOrNull()?.position?.fen == board.position.fen) return
-        frames += Frame(
-            position = board.position,
-            lastMove = lastMove?.let { it.start to it.end },
-            checkedKingSquare = checkedKingSquare(board.state, board.position),
-        )
-        // Stay pinned to the newest frame while the game is still being played, so a game that
-        // ends is already showing the position it ended on.
-        frameIndex = frames.lastIndex
     }
 
     /** Steps the finished-game board one position back or forward, stopping at either end. */
     fun onStepReplay(forward: Boolean) {
-        val target = (frameIndex + if (forward) 1 else -1).coerceIn(0, frames.lastIndex.coerceAtLeast(0))
-        if (target == frameIndex) return
-        frameIndex = target
+        if (!replay.step(forward)) return
         _state.update { it.withCurrentBoard() }
     }
 
@@ -283,8 +270,8 @@ class GameViewViewModel(
             lastMove = null
             // The board is rebuilt from scratch here, so the replay is too — starting from the
             // opening position, which no move produced and nothing else would record.
-            frames.clear()
-            recordFrame()
+            replay.clear()
+            replay.record(currentFrame())
             sorted.forEach { replayMove(it) }
             actions = gameActionState(sorted, playerId)
             whiteId = detail.game.whitePlayerID
@@ -462,7 +449,7 @@ class GameViewViewModel(
         // The replay is built here rather than at the single publish point, because this runs in
         // a loop that publishes once at the end — by which time every intermediate position the
         // player wants to step back through is already gone.
-        recordFrame()
+        replay.record(currentFrame())
     }
 
     // Taps only move our own pieces: they're ignored unless it's this device's
