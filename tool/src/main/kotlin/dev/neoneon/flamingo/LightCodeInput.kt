@@ -1,4 +1,4 @@
-package com.thelightphone.sdk.ui
+package dev.neoneon.flamingo
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.delete
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -27,9 +28,26 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.thelightphone.lp3Keyboard.ui.*
+import com.thelightphone.lp3Keyboard.ui.KeyboardOptions
+import com.thelightphone.lp3Keyboard.ui.LayoutOptions
+import com.thelightphone.lp3Keyboard.ui.SpecialKey
+import com.thelightphone.lp3Keyboard.ui.viewmodel.EnQwertyLp3KeyboardViewModel
+import com.thelightphone.lp3Keyboard.ui.viewmodel.Lp3KeyboardViewModel
+import com.thelightphone.lp3Keyboard.ui.viewmodel.Lp3RepeatableKeyboardCallback
+import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
+import com.thelightphone.sdk.ui.LightIcons
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightTheme
+import com.thelightphone.sdk.ui.LightThemeColors
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.defaultKeyboardOptions
+import com.thelightphone.sdk.ui.designVerticalPxToDp
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.keyboard.LightEmbeddedLp3Keyboard
-import com.thelightphone.sdk.ui.keyboard.TextInputKeyboardCallback
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.drop
@@ -58,8 +76,8 @@ fun normalizeLetterCode(raw: String, length: Int): String =
  * LP3 keyboard. Convenience overload that builds the keyboard view-model for you; pass a
  * [keyboardOptionsFlow] from `rememberKeyboardOptions()`.
  *
- * Editing follows the platform's normal text model (the same [TextInputKeyboardCallback] the
- * full-screen editor uses): keys insert, Backspace deletes, Return submits. A reactive
+ * Editing follows the platform's normal text model (the same key/Backspace/Return wiring the
+ * SDK's own full-screen editor uses): keys insert, Backspace deletes, Return submits. A reactive
  * normalization pass then keeps [state] to [normalize]'s shape — for the default that means
  * uppercase ASCII letters, non-letters dropped, capped at [length] — and the boxes simply
  * mirror the result. This is the Compose analog of the iOS `CodeInputView`.
@@ -85,14 +103,13 @@ fun LightCodeInput(
 ) {
     val currentOnSubmit by rememberUpdatedState(onSubmit)
     val keyboardCallback = remember(state) {
-        TextInputKeyboardCallback(
+        CodeInputKeyboardCallback(
             state = state,
-            singleLine = true,
             onReturn = { currentOnSubmit(state.text) },
         )
     }
 
-    val keyboardViewModel: Lp3KeyboardViewModel = viewModel<DefaultLp3KeyboardViewModel>(
+    val keyboardViewModel: Lp3KeyboardViewModel<*> = viewModel<EnQwertyLp3KeyboardViewModel<*>>(
         key = "LightCodeInput-$editorKey",
         factory = factory(keyboardCallback, keyboardOptionsFlow),
     )
@@ -122,7 +139,7 @@ fun LightCodeInput(
     length: Int,
     onSubmit: (CharSequence) -> Unit,
     onBack: () -> Unit,
-    viewModel: Lp3KeyboardViewModel,
+    viewModel: Lp3KeyboardViewModel<*>,
     modifier: Modifier = Modifier,
     submitLabel: String = "SUBMIT",
     onComplete: ((CharSequence) -> Unit)? = null,
@@ -226,6 +243,96 @@ private fun CodeBoxes(text: String, length: Int) {
     }
 }
 
+/**
+ * Wires an embedded LP3 keyboard to a single-line [TextFieldState]: keys insert at the cursor,
+ * Backspace deletes (a whole surrogate pair or, on long-press, a whole word), Return submits.
+ * The SDK's own editors have an equivalent, but it's `internal` to `sdk:ui`, so this is a
+ * tool-local copy rather than a shared dependency.
+ */
+private class CodeInputKeyboardCallback(
+    private val state: TextFieldState,
+    private val onReturn: () -> Unit,
+) : Lp3RepeatableKeyboardCallback {
+
+    override fun onKeyPressed(code: Int) = Unit
+
+    override fun onSpecialKeyPressed(key: SpecialKey) {
+        if (key == SpecialKey.Space) insertAtCursor(" ")
+    }
+
+    override fun onKeyReleased(code: Int) {
+        insertCodePoint(code)
+    }
+
+    override fun onSpecialKeyReleased(key: SpecialKey) {
+        when (key) {
+            SpecialKey.Backspace -> {
+                val before = state.text.subSequence(0, state.selection.min)
+                deleteBeforeCursor(surrogateAwareDeleteCount(before))
+            }
+            SpecialKey.Return -> onReturn()
+            else -> Unit
+        }
+    }
+
+    override fun onKeyLongPressed(code: Int) = Unit
+
+    override fun onSpecialKeyLongPressed(key: SpecialKey) {
+        if (key == SpecialKey.Backspace) {
+            val before = state.text.subSequence(0, state.selection.min)
+            deleteBeforeCursor(deleteWordCount(before))
+        }
+    }
+
+    override fun onKeyRepeated(code: Int) {
+        insertCodePoint(code)
+    }
+
+    override fun onSpecialKeyRepeated(specialKey: SpecialKey) {
+        if (specialKey == SpecialKey.Space) insertAtCursor(" ")
+    }
+
+    override fun onSubmitWord(word: CharSequence) {
+        insertAtCursor(word.toString())
+    }
+
+    private fun insertCodePoint(code: Int) {
+        insertAtCursor(buildString { appendCodePoint(code) })
+    }
+
+    private fun insertAtCursor(text: String) {
+        state.edit {
+            val start = selection.min
+            val end = selection.max
+            replace(start, end, text)
+            selection = TextRange(start + text.length)
+        }
+    }
+
+    private fun deleteBeforeCursor(count: Int) {
+        if (count <= 0) return
+        state.edit {
+            val end = selection.min
+            if (end == 0) return@edit
+            val start = (end - count).coerceAtLeast(0)
+            delete(start, end)
+            selection = TextRange(start)
+        }
+    }
+}
+
+private fun surrogateAwareDeleteCount(value: CharSequence): Int {
+    if (value.isEmpty()) return 0
+    val last = value[value.length - 1]
+    return if (Character.isLowSurrogate(last)) 2 else 1
+}
+
+private fun deleteWordCount(value: CharSequence): Int {
+    val trimmed = value.trimEnd()
+    val lastSpace = trimmed.indexOfLast { it.isWhitespace() }
+    return value.length - if (lastSpace >= 0) lastSpace + 1 else 0
+}
+
 private fun factory(
     callback: Lp3RepeatableKeyboardCallback,
     keyboardOptionsFlow: StateFlow<KeyboardOptions>,
@@ -233,14 +340,11 @@ private fun factory(
     object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return DefaultLp3KeyboardViewModel(
+            return EnQwertyLp3KeyboardViewModel<Unit>(
                 callback,
                 keyboardOptionsFlow = keyboardOptionsFlow,
                 optionsForLayout = {
-                    val showCloseButton = when (it) {
-                        EmojiLayout, is ExtendedCharKeyboard -> true
-                        CapsLockedLayout, LowerCaseLayout, NumberLayout, SymbolsLayout, UpperCaseLayout -> false
-                    }
+                    val showCloseButton = !it.isRootLayout
                     LayoutOptions(showCloseButton)
                 },
             ) as T
