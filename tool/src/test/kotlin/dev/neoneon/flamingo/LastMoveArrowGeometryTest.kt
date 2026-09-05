@@ -1,5 +1,6 @@
 package dev.neoneon.flamingo
 
+import androidx.compose.ui.geometry.Offset
 import dev.neoneon.chesskit.Piece
 import dev.neoneon.chesskit.Square
 import kotlin.test.Test
@@ -71,5 +72,45 @@ class LastMoveArrowGeometryTest {
                 assertTrue(center.x in 5f..75f && center.y in 5f..75f, "$square escaped the board")
             }
         }
+    }
+
+    private fun direction(from: Square, to: Square, orientation: Piece.Color) = lastMoveDirection(
+        from = from,
+        to = to,
+        fileOrder = boardFileOrder(orientation),
+        rankOrder = boardRankOrder(orientation),
+    )
+
+    @Test
+    fun bucketsAPawnPushToTheAxisOctantAwayFromTheMovingPlayer() {
+        assertEquals(LastMoveOctant.N, octantOf(direction(Square.e2, Square.e4, Piece.Color.white)))
+        assertEquals(LastMoveOctant.S, octantOf(direction(Square.e2, Square.e4, Piece.Color.black)))
+    }
+
+    @Test
+    fun bucketsAPureDiagonalToItsCorner() {
+        // a1-h8 runs straight up-and-right for white — into the far corner from the near one.
+        assertEquals(LastMoveOctant.NE, octantOf(direction(Square.a1, Square.h8, Piece.Color.white)))
+        // Flipped for black, the same line runs down-and-left.
+        assertEquals(LastMoveOctant.SW, octantOf(direction(Square.a1, Square.h8, Piece.Color.black)))
+    }
+
+    @Test
+    fun bucketsEveryKnightShapedMoveToACorner() {
+        // A knight's direction is never exactly 45°, but it's always closer to a diagonal than to
+        // an axis (see octantOf's doc comment), so it should never land on an edge midpoint.
+        val corners = setOf(LastMoveOctant.NE, LastMoveOctant.NW, LastMoveOctant.SE, LastMoveOctant.SW)
+        for (dx in listOf(-2, -1, 1, 2)) {
+            for (dy in listOf(-2, -1, 1, 2)) {
+                if (kotlin.math.abs(dx) == kotlin.math.abs(dy)) continue
+                val octant = octantOf(Offset(dx.toFloat(), dy.toFloat()))
+                assertTrue(octant in corners, "knight vector ($dx, $dy) landed on $octant, not a corner")
+            }
+        }
+    }
+
+    @Test
+    fun returnsNullForAZeroVector() {
+        assertEquals(null, octantOf(Offset.Zero))
     }
 }
