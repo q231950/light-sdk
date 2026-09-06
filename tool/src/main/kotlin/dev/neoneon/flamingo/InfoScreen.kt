@@ -81,6 +81,9 @@ class InfoScreen(sealedActivity: SealedLightActivity) : SimpleLightScreen<Unit>(
                         .fillMaxWidth()
                         .padding(start = 1f.gridUnitsAsDp()),
                 ) {
+                    InfoRow(title = "Board") {
+                        navigateTo(screenFactory = { SettingsScreen(it) })
+                    }
                     InfoRow(title = "Terms of Service") {
                         navigateTo(screenFactory = { LegalDocScreen(it, LegalDoc.Terms) })
                     }

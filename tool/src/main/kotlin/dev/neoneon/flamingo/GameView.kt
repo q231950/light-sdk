@@ -53,9 +53,33 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "GameView"
 
+/**
+ * Whether the board should mark [lastMove] while a game is still live, per [visibility].
+ *
+ * A finished game is unaffected by this — it always shows its last move (see the board render call
+ * site in [GameScreen]) — this only gates the live-play case, where showing it at all is optional.
+ * [LastMoveVisibility.OpponentOnly] reads the mover's color off the piece now sitting on the
+ * destination square rather than tracking it separately, which stays correct through a promotion
+ * too (the promoted piece keeps the mover's color).
+ */
+internal fun shouldShowLiveLastMove(
+    visibility: LastMoveVisibility,
+    lastMove: Pair<Square, Square>?,
+    position: Position,
+    localColor: Piece.Color,
+): Boolean {
+    if (lastMove == null) return false
+    return when (visibility) {
+        LastMoveVisibility.Hidden -> false
+        LastMoveVisibility.Latest -> true
+        LastMoveVisibility.OpponentOnly -> position.piece(at = lastMove.second)?.color != localColor
+    }
+}
+
 class GameViewViewModel(
     val gameId: String,
     private val identityStore: PlayerIdentityStore,
+    private val lastMoveVisibilityStore: LastMoveVisibilityStore,
     // The color this device plays. A seed only: it's what "New game" (white) vs.
     // "Accept invite" (black) opened the screen as, and is overridden by the
     // server's record once the game is fetched (see loadExistingGame).
@@ -141,6 +165,10 @@ class GameViewViewModel(
         // step through. Count is 0 while the game is on — there is nothing to replay yet.
         val frameIndex: Int = 0,
         val frameCount: Int = 0,
+        // The player's chosen live-play marking, read reactively off LastMoveVisibilityStore (see
+        // the init block) so a change made on the settings screen reaches a game already on the
+        // back stack. Only gates the live board — see shouldShowLiveLastMove.
+        val lastMoveVisibility: LastMoveVisibility = LastMoveVisibility.OpponentOnly,
     ) {
         /** A finished game with more than its opening position is worth stepping through. */
         val canReplay: Boolean get() = outcome != null && frameCount > 1
@@ -173,6 +201,16 @@ class GameViewViewModel(
 
     private val _state = MutableStateFlow(State(position = board.position, localColor = initialColor))
     val state: StateFlow<State> = _state
+
+    init {
+        // Independent of onScreenShow's hasLoadedInitialState gate, so a setting flip on the
+        // settings screen is picked up even while this screen sits backgrounded on the stack.
+        viewModelScope.launch {
+            lastMoveVisibilityStore.flow.collect { visibility ->
+                _state.update { it.copy(lastMoveVisibility = visibility) }
+            }
+        }
+    }
 
     // Every position the game has stood in, and where the player has stepped to in it. Recorded at
     // the one point every board advance publishes through, so the four sites that move a piece need
@@ -703,8 +741,12 @@ class GameView(
     override val viewModelClass: Class<GameViewViewModel>
         get() = GameViewViewModel::class.java
 
-    override fun createViewModel() =
-        GameViewViewModel(gameId, PlayerIdentityStore(lightContext.dataStore), initialColor)
+    override fun createViewModel() = GameViewViewModel(
+        gameId,
+        PlayerIdentityStore(lightContext.dataStore),
+        LastMoveVisibilityStore(lightContext.dataStore),
+        initialColor,
+    )
 
     @Composable
     override fun Content() {
@@ -882,9 +924,16 @@ private fun ColumnScope.GameContent(
                 orientation = state.localColor,
                 boardSize = minOf(maxWidth, maxHeight),
                 checkedKingSquare = state.checkedKingSquare,
-                // The arrow points out the move the board is sitting on. During play it stays
-                // clean; stepping back through a finished game it follows each move in turn.
-                lastMove = state.lastMove.takeIf { outcome != null },
+                // Always shown once the game is over — stepping back through it, the marker
+                // follows each move in turn. Live, it's gated by the player's own setting.
+                lastMove = state.lastMove.takeIf {
+                    outcome != null || shouldShowLiveLastMove(
+                        visibility = state.lastMoveVisibility,
+                        lastMove = state.lastMove,
+                        position = state.position,
+                        localColor = state.localColor,
+                    )
+                },
             )
         }
     }

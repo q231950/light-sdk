@@ -9,7 +9,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -19,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -32,19 +30,23 @@ import dev.neoneon.chesskit.Board
 import dev.neoneon.chesskit.Piece
 import dev.neoneon.chesskit.Position
 import dev.neoneon.chesskit.Square
+import kotlin.math.atan2
 
 // Same weight as the SDK's active code-input underline, so the check marker reads as a line
 // rather than a hairline (see LightCodeInput's ACTIVE_UNDERLINE_THICKNESS_PX).
 private const val CHECK_UNDERLINE_THICKNESS_PX = 7f
 private const val CHECK_UNDERLINE_DURATION_MS = 220
 
-// The last-move arrow, in fractions of a square rather than design pixels: unlike the check
-// underline it spans two squares, and its length already varies with the move, so a fixed-pixel
-// arrow would look spindly on a long move and stubby on a short one.
-private const val ARROW_END_INSET = 0.28f    // clears the piece glyph at either end
-private const val ARROW_SHAFT_WIDTH = 0.06f
-private const val ARROW_HEAD_LENGTH = 0.26f
-private const val ARROW_HEAD_HALF_WIDTH = 0.11f
+// The last-move markers, in fractions of a square rather than design pixels, so they scale with
+// however big the board ends up on screen instead of looking spindly or oversized.
+private const val LAST_MOVE_DOT_RADIUS_FRACTION = 0.06f
+// How far from the to-square's own center the little arrow sits — offset toward whichever
+// corner/edge the move arrived from, so it clears the piece glyph parked in the center. Pushed
+// further out and drawn smaller than an early pass: at the piece glyph's size, anything nearer or
+// bigger kept clipping it.
+private const val LAST_MOVE_MARKER_INSET_FRACTION = 0.34f
+private const val LAST_MOVE_ARROW_LENGTH_FRACTION = 0.12f
+private const val LAST_MOVE_ARROW_HALF_WIDTH_FRACTION = 0.05f
 
 /**
  * The square holding the king that [state] reports as being in check, or `null` if neither is.
@@ -83,8 +85,10 @@ internal fun checkedKingSquare(state: Board.State, position: Position): Square? 
  * square, drawing in from its left edge to its right. Callers derive it from their board with the
  * `checkedKingSquare` function above.
  *
- * [lastMove] draws a small arrow from a move's origin square to its destination. Used to point out
- * the move a finished game ended on; during play the board is left unmarked.
+ * [lastMove] marks a move's origin square with a small dot and its destination square with a small
+ * arrow, oriented toward whichever corner or edge the move arrived from. Always shown for the move
+ * a finished game ended on (or, mid-replay, whichever move produced the frame on screen); during
+ * live play it's the caller's choice whether to pass one.
  */
 @Composable
 fun ChessBoard(
@@ -101,34 +105,32 @@ fun ChessBoard(
     val squareSize = boardSize / 8
     val rankOrder = boardRankOrder(orientation)
     val fileOrder = boardFileOrder(orientation)
-    // The arrow spans two squares, so unlike the check underline it can't be drawn by a square:
-    // it goes over the whole board, in the same box.
     Box(modifier = modifier.size(boardSize)) {
         Column {
             for (rankValue in rankOrder) {
                 Row {
                     for (file in fileOrder) {
                         val square = Square(file, Square.Rank(rankValue))
+                        val lastMoveOctant = lastMove
+                            ?.takeIf { it.second == square }
+                            ?.let { (from, to) -> octantOf(lastMoveDirection(from, to, fileOrder, rankOrder)) }
                         ChessSquare(
                             piece = position.piece(at = square),
                             isDark = square.color == Square.Color.dark,
                             isSelected = square == selectedSquare,
                             isLegalTarget = square in legalTargets,
                             isInCheck = square == checkedKingSquare,
+                            isLastMoveOrigin = lastMove?.first == square,
+                            lastMoveOctant = lastMoveOctant,
+                            lastMoveDescription = lastMove
+                                ?.takeIf { it.second == square }
+                                ?.let { "Last move ${it.first.notation} to ${it.second.notation}" },
                             squareSize = squareSize,
                             onTap = { onSquareTap(square) },
                         )
                     }
                 }
             }
-        }
-        if (lastMove != null) {
-            LastMoveArrow(
-                from = lastMove.first,
-                to = lastMove.second,
-                fileOrder = fileOrder,
-                rankOrder = rankOrder,
-            )
         }
     }
 }
@@ -157,57 +159,53 @@ internal fun squareCenter(
     y = (rankOrder.indexOf(square.rank.value) + 0.5f) * squareSize,
 )
 
-/** A thin arrow from [from]'s center to [to]'s, drawn over the whole board. */
-@Composable
-private fun LastMoveArrow(
+/**
+ * The 8 compass directions a last-move marker can sit in on a square, screen-space (N = up the
+ * screen, independent of board orientation — [lastMoveDirection] already flips for black).
+ */
+internal enum class LastMoveOctant(val unit: Offset) {
+    N(Offset(0f, -1f)),
+    NE(Offset(0.7071f, -0.7071f)),
+    E(Offset(1f, 0f)),
+    SE(Offset(0.7071f, 0.7071f)),
+    S(Offset(0f, 1f)),
+    SW(Offset(-0.7071f, 0.7071f)),
+    W(Offset(-1f, 0f)),
+    NW(Offset(-0.7071f, -0.7071f)),
+}
+
+/**
+ * The screen-space step from [from] to [to], in whole squares rather than pixels: orientation-aware
+ * via [fileOrder]/[rankOrder] — the same index arithmetic [squareCenter] uses — but exact, since it
+ * never multiplies by a pixel size that would need rounding back out.
+ */
+internal fun lastMoveDirection(
     from: Square,
     to: Square,
     fileOrder: List<Square.File>,
     rankOrder: List<Int>,
-) {
-    val color = LightThemeTokens.colors.content
-    val description = "Last move ${from.notation} to ${to.notation}"
+): Offset = Offset(
+    x = (fileOrder.indexOf(to.file) - fileOrder.indexOf(from.file)).toFloat(),
+    y = (rankOrder.indexOf(to.rank.value) - rankOrder.indexOf(from.rank.value)).toFloat(),
+)
 
-    Canvas(
-        modifier = Modifier
-            .fillMaxSize()
-            .semantics { contentDescription = description },
-    ) {
-        val square = size.width / 8f
-        val start = squareCenter(from, fileOrder, rankOrder, square)
-        val end = squareCenter(to, fileOrder, rankOrder, square)
-        val length = (end - start).getDistance()
-        // A null move can't reach here (chesskit never produces one), but a zero-length vector
-        // would divide by zero below.
-        if (length == 0f) return@Canvas
-
-        val direction = Offset((end.x - start.x) / length, (end.y - start.y) / length)
-        val tip = end - direction * (ARROW_END_INSET * square)
-        val tail = start + direction * (ARROW_END_INSET * square)
-        // Nothing left to draw once the inset eats the whole arrow — impossible for a legal move
-        // (the shortest is one square, and the head fits), but cheap to be sure of.
-        if ((tip - tail).getDistance() <= ARROW_HEAD_LENGTH * square) return@Canvas
-
-        val headBase = tip - direction * (ARROW_HEAD_LENGTH * square)
-        val across = Offset(-direction.y, direction.x) * (ARROW_HEAD_HALF_WIDTH * square)
-
-        drawLine(
-            color = color,
-            start = tail,
-            end = headBase,
-            strokeWidth = ARROW_SHAFT_WIDTH * square,
-            cap = StrokeCap.Round,
-        )
-        drawPath(
-            path = Path().apply {
-                moveTo(tip.x, tip.y)
-                lineTo(headBase.x + across.x, headBase.y + across.y)
-                lineTo(headBase.x - across.x, headBase.y - across.y)
-                close()
-            },
-            color = color,
-        )
-    }
+/**
+ * Buckets [direction] into the nearest of the 8 [LastMoveOctant]s. Every rook/bishop/queen/king/pawn
+ * move's direction already sits exactly on one of the 8 (a pure file, a pure rank, or a pure
+ * diagonal), so those land without rounding. A knight's isn't: its direction sits at ~26.57° or
+ * ~63.43° from the nearer axis, which is always closer to the diagonal bucket than the axis one — so
+ * every knight move lands on a corner, never an edge midpoint. Null only for a zero vector, which no
+ * legal move produces (a piece always leaves the square it started on).
+ */
+internal fun octantOf(direction: Offset): LastMoveOctant? {
+    if (direction == Offset.Zero) return null
+    val degrees = Math.toDegrees(atan2(-direction.y, direction.x).toDouble())
+    // atan2 runs counter-clockwise from east (0°); floorMod handles the wrap at ±180°.
+    val index = Math.floorMod(Math.round(degrees / 45.0).toInt(), 8)
+    return listOf(
+        LastMoveOctant.E, LastMoveOctant.NE, LastMoveOctant.N, LastMoveOctant.NW,
+        LastMoveOctant.W, LastMoveOctant.SW, LastMoveOctant.S, LastMoveOctant.SE,
+    )[index]
 }
 
 @Composable
@@ -217,6 +215,9 @@ private fun ChessSquare(
     isSelected: Boolean,
     isLegalTarget: Boolean,
     isInCheck: Boolean,
+    isLastMoveOrigin: Boolean,
+    lastMoveOctant: LastMoveOctant?,
+    lastMoveDescription: String?,
     squareSize: Dp,
     onTap: () -> Unit,
 ) {
@@ -236,18 +237,19 @@ private fun ChessSquare(
         animationSpec = tween(durationMillis = CHECK_UNDERLINE_DURATION_MS, easing = LinearEasing),
         label = "checkUnderline",
     )
-    val checkSemantics = if (isInCheck) {
-        Modifier.semantics { contentDescription = "King in check" }
-    } else {
-        Modifier
-    }
+    // A square is never both the checked king's and a last move's endpoint at once — a king can't
+    // move into check on itself — so there's never a second description competing for this slot.
+    val markerDescription = if (isInCheck) "King in check" else lastMoveDescription
+    val markerSemantics = markerDescription?.let { description ->
+        Modifier.semantics { contentDescription = description }
+    } ?: Modifier
 
     Box(
         modifier = Modifier
             .size(squareSize)
             .background(content.copy(alpha = backgroundAlpha))
             .clickable(onClick = onTap)
-            .then(checkSemantics),
+            .then(markerSemantics),
         contentAlignment = Alignment.Center,
     ) {
         if (piece != null) {
@@ -265,6 +267,37 @@ private fun ChessSquare(
                     .height(CHECK_UNDERLINE_THICKNESS_PX.designVerticalPxToDp())
                     .background(content),
             )
+        }
+        if (isLastMoveOrigin || lastMoveOctant != null) {
+            Canvas(modifier = Modifier.size(squareSize)) {
+                val square = size.width
+                if (isLastMoveOrigin) {
+                    drawCircle(
+                        color = content,
+                        radius = square * LAST_MOVE_DOT_RADIUS_FRACTION,
+                        center = center,
+                    )
+                }
+                if (lastMoveOctant != null) {
+                    val unit = lastMoveOctant.unit
+                    // Anchored against unit (the direction of travel), not with it: the marker
+                    // sits on the near side of the square — the edge/corner closest to the square
+                    // the piece came from — rather than the far side it moved toward.
+                    val anchor = center - unit * (square * LAST_MOVE_MARKER_INSET_FRACTION)
+                    val tip = anchor + unit * (square * LAST_MOVE_ARROW_LENGTH_FRACTION / 2f)
+                    val base = anchor - unit * (square * LAST_MOVE_ARROW_LENGTH_FRACTION / 2f)
+                    val across = Offset(-unit.y, unit.x) * (square * LAST_MOVE_ARROW_HALF_WIDTH_FRACTION)
+                    drawPath(
+                        path = Path().apply {
+                            moveTo(tip.x, tip.y)
+                            lineTo(base.x + across.x, base.y + across.y)
+                            lineTo(base.x - across.x, base.y - across.y)
+                            close()
+                        },
+                        color = content,
+                    )
+                }
+            }
         }
     }
 }
