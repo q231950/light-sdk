@@ -68,9 +68,10 @@ the SDK supplies the back button. Screens come in `LightScreen` / `LightViewMode
 | `ReplayLog` | Move history, numbered by half-move to match the backend |
 | `FlamingoApi` / `FlamingoModels` | Ktor HTTP client against `https://neoneon.dev/flamingo` |
 | `LiveTransport` (port) / `KtorLiveTransport` (adapter) | The live WebSocket |
-| `PlayerIdentity` | One player ID per installation, in DataStore |
+| `PlayerIdentity` | One player ID per installation, in DataStore, plus its server registration and cached display name |
+| `AccountScreen` | This install's display name — view and rename, reached from Info |
 | `SettingsScreen` / `LastMoveVisibility` | Settings, incl. last-move marking (`Hidden` / `Latest` / `OpponentOnly`) |
-| `InfoScreen` | Legal docs and move actions, reached from the bottom bar |
+| `InfoScreen` | Account, board settings, and legal docs, reached from the bottom bar |
 
 Keep the transport behind the `LiveTransport` port — `KtorLiveTransport` is the only thing
 that should know about Ktor websockets. The iOS side mirrors this split
@@ -100,6 +101,13 @@ the half-move the actor would have played next.
 - **Compare player IDs case-insensitively** (`samePlayer`). This client mints lowercase
   `UUID.randomUUID()` strings; the server round-trips them through a Swift `UUID` and
   echoes them back uppercase. A plain `==` silently resolved every player to black.
+- **Every player has a display name**, so a game is titled `"blueberry764 vs orange489"`
+  (`Game.title`, white first). The server mints it; this tool registers its id once
+  (`PlayerIdentityStore.ensureRegistered`) and caches the name in DataStore. Names are read
+  through `/flamingo/players`, never off the game record, and looked up through a **lower-cased**
+  map (`byPlayerId`) for the same case mismatch `samePlayer` exists for. Each seat falls back on
+  its own — "open seat" for an unfilled one, the id's first 8 characters for a name that hasn't
+  arrived — so a failed lookup never blanks a row.
 - **One identity per install, either color.** `PlayerIdentityStore` reuses the legacy
   `FLAMINGO_WHITE_PLAYER_ID` value when present, so games created back when a local game
   was always white aren't orphaned.

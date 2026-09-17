@@ -52,7 +52,7 @@ enum class LegalDoc(
     ),
 }
 
-/** Lists the two legal documents; each row pushes a scrollable [LegalDocScreen]. */
+/** The tool's settings: this install's [AccountScreen] name, board display, and the legal docs. */
 class InfoScreen(sealedActivity: SealedLightActivity) : SimpleLightScreen<Unit>(sealedActivity) {
 
     @Composable
@@ -81,6 +81,9 @@ class InfoScreen(sealedActivity: SealedLightActivity) : SimpleLightScreen<Unit>(
                         .fillMaxWidth()
                         .padding(start = 1f.gridUnitsAsDp()),
                 ) {
+                    InfoRow(title = "Account") {
+                        navigateTo(screenFactory = { AccountScreen(it) })
+                    }
                     InfoRow(title = "Board") {
                         navigateTo(screenFactory = { SettingsScreen(it) })
                     }

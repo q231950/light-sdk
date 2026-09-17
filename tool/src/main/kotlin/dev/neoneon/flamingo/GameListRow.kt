@@ -13,11 +13,14 @@ fun GameListRow(
     game: Game,
     // This device's player id, so an in-progress game can say whose move it is.
     playerId: String?,
+    // Display names keyed by player id, from `FlamingoApi.fetchPlayerNames`. Empty until they
+    // arrive — [Game.title] falls back per seat, so the row draws either way.
+    names: Map<String, String> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         LightText(
-            text = "Game ${game.id.take(8)}",
+            text = game.title(names),
             variant = LightTextVariant.Copy,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

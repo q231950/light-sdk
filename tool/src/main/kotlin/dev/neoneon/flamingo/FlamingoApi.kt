@@ -5,6 +5,7 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
+import io.ktor.client.request.patch
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
@@ -151,6 +152,55 @@ internal class FlamingoApi {
         response.body()
     }
 
+    /**
+     * Claims this installation's player id and returns the display name the server holds for it.
+     *
+     * Called once per install (see [PlayerIdentityStore.ensureRegistered]). The server mints a
+     * colour name for an id it has never seen; for one it already knows — because the opponent's
+     * move created the row first, or because a previous launch already registered — it returns the
+     * existing name untouched. Registering twice therefore costs the player nothing.
+     */
+    suspend fun registerPlayer(playerId: String): Result<PlayerName> = runCatching {
+        val response = client.post("$BASE_URL/players") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterPlayerRequest(playerID = playerId))
+        }
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException("HTTP ${response.status.value}: ${response.bodyAsText().take(500)}")
+        }
+        response.body()
+    }
+
+    /**
+     * The display names for [playerIds], in one request — what the games list calls so it can
+     * title every row without a request per seat.
+     *
+     * Ids the server has no player for are simply absent from the result; the caller falls back
+     * per seat (see [Game.title]) rather than losing the whole batch. An empty input skips the
+     * request entirely.
+     */
+    suspend fun fetchPlayerNames(playerIds: Collection<String>): Result<List<PlayerName>> = runCatching {
+        if (playerIds.isEmpty()) return@runCatching emptyList()
+        val ids = playerIds.distinct().joinToString(",")
+        val response = client.get("$BASE_URL/players?ids=$ids")
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException("HTTP ${response.status.value}: ${response.bodyAsText().take(500)}")
+        }
+        response.body()
+    }
+
+    /** Renames [playerId] to [name] — the write behind the Account screen. */
+    suspend fun renamePlayer(playerId: String, name: String): Result<PlayerName> = runCatching {
+        val response = client.patch("$BASE_URL/players/$playerId") {
+            contentType(ContentType.Application.Json)
+            setBody(RenamePlayerRequest(name = name))
+        }
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException(renameErrorMessage(response.status.value))
+        }
+        response.body()
+    }
+
     fun close() {
         client.close()
     }
@@ -169,6 +219,17 @@ private fun shareErrorMessage(status: Int): String = when (status) {
     409 -> "Both players joined"
     503 -> "Try again in a moment"
     else -> "Couldn't get code ($status)"
+}
+
+/**
+ * 422 is the only one a player can act on: the server rejects a name that is empty, longer than
+ * 24 characters, or not a single line. A 404 means this install's id was never registered, which
+ * the next launch repairs on its own.
+ */
+private fun renameErrorMessage(status: Int): String = when (status) {
+    404 -> "Not registered yet - try later"
+    422 -> "Use 1-24 characters, one line"
+    else -> "Couldn't save name ($status)"
 }
 
 private fun joinErrorMessage(status: Int): String = when (status) {
@@ -208,6 +269,16 @@ private data class InviteRequest(
     val whitePlayerID: String? = null,
     val blackPlayerID: String? = null,
     val origin: String,
+)
+
+@Serializable
+private data class RegisterPlayerRequest(
+    val playerID: String,
+)
+
+@Serializable
+private data class RenamePlayerRequest(
+    val name: String,
 )
 
 @Serializable

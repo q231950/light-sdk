@@ -41,8 +41,13 @@ class GamesListViewModel(private val identityStore: PlayerIdentityStore) : Light
 
     sealed class State {
         data object Loading : State()
-        // Carries the local player id so each row can say whose turn it is.
-        data class Loaded(val games: List<Game>, val playerId: String) : State()
+        // Carries the local player id so each row can say whose turn it is, and the display
+        // names for every seat on screen so each row can title itself "white vs black".
+        data class Loaded(
+            val games: List<Game>,
+            val playerId: String,
+            val names: Map<String, String> = emptyMap(),
+        ) : State()
         data class Error(val message: String) : State()
     }
 
@@ -58,8 +63,21 @@ class GamesListViewModel(private val identityStore: PlayerIdentityStore) : Light
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = State.Loading
             val playerId = identityStore.getOrCreate()
+            // Once per install, and never blocking the list: a game list without names still
+            // works, so a failure here just leaves the rows titled by id until the next launch.
+            identityStore.ensureRegistered(api, playerId)
             api.listGames(playerId).fold(
-                onSuccess = { games -> _state.value = State.Loaded(games, playerId) },
+                onSuccess = { games ->
+                    // Show the games first, then fill the names in. One extra request for the
+                    // whole list, and the list is never held back waiting for it.
+                    _state.value = State.Loaded(games, playerId)
+                    val names = api.fetchPlayerNames(
+                        games.flatMap { listOfNotNull(it.whitePlayerID, it.blackPlayerID) }
+                    ).getOrNull()?.byPlayerId().orEmpty()
+                    if (names.isNotEmpty()) {
+                        _state.value = State.Loaded(games, playerId, names)
+                    }
+                },
                 onFailure = { error -> _state.value = State.Error(error.message ?: "Unable to load games") },
             )
         }
@@ -162,6 +180,7 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                                     GameListRow(
                                         game = game,
                                         playerId = current.playerId,
+                                        names = current.names,
                                         modifier = Modifier
                                             // Finished games open in the same screen as active
                                             // ones — GameView replays the move log, so it's the
