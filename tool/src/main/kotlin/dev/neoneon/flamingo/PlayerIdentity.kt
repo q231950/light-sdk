@@ -61,7 +61,11 @@ class PlayerIdentityStore(private val dataStore: DataStore<Preferences>) {
      * or fails the caller, since a nameless games list still works.
      *
      * Registering is safe to repeat in any case: the server returns the name it already holds
-     * rather than minting a new one, so a lost flag never costs the player the name they chose.
+     * rather than minting a new one, so a lost flag never costs the player the name they chose —
+     * as long as the key matches. A **401 or 409 must never set the flag**: 409 means this id is
+     * bound to another device's key and every rename will keep failing, and recording that as
+     * success would hide it permanently behind a flag nothing clears. `getOrNull()` already
+     * gives that, since every failure path returns null.
      *
      * `internal` because [FlamingoApi] is: a public member may not expose an internal type.
      */

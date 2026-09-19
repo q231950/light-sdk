@@ -69,6 +69,7 @@ the SDK supplies the back button. Screens come in `LightScreen` / `LightViewMode
 | `FlamingoApi` / `FlamingoModels` | Ktor HTTP client against `https://neoneon.dev/flamingo` |
 | `LiveTransport` (port) / `KtorLiveTransport` (adapter) | The live WebSocket |
 | `PlayerIdentity` | One player ID per installation, in DataStore, plus its server registration and cached display name |
+| `PlayerKeyStore` / `SignedRequestPayload` | The AndroidKeyStore signing key, and the canonical payload every signed request agrees on |
 | `AccountScreen` | This install's display name — view and rename, reached from Info |
 | `SettingsScreen` / `LastMoveVisibility` | Settings, incl. last-move marking (`Hidden` / `Latest` / `OpponentOnly`) |
 | `InfoScreen` | Account, board settings, and legal docs, reached from the bottom bar |
@@ -101,6 +102,24 @@ the half-move the actor would have played next.
 - **Compare player IDs case-insensitively** (`samePlayer`). This client mints lowercase
   `UUID.randomUUID()` strings; the server round-trips them through a Swift `UUID` and
   echoes them back uppercase. A plain `==` silently resolved every player to black.
+- **Editing the name is signed.** `PATCH /flamingo/players/:id` requires a P-256 signature
+  from a key generated in the **AndroidKeyStore** (`PlayerKeyStore`); reads are not signed.
+  `SignedRequestPayload.canonical` must agree **byte for byte** with neoneon's
+  `SignedRequest.swift` and iOS's — the shared fixture in `neoneon/docs/flamingo-api.md` is
+  asserted in all three suites, because a mismatch shows up only as an opaque 401. Specified
+  in `neoneon/docs/adr/ADR-001-signed-personal-data-edits.md`.
+- **The signed `playerId` is upper-cased; the signed path is not.** This client mints
+  lowercase `UUID` strings and Swift's `uuidString` is uppercase, so without that one
+  normalization the two clients sign different bytes for the same player. Same mismatch
+  `samePlayer` exists for, but failing silently instead of loudly.
+- **Signed bodies are serialized by hand into a `TextContent`**, never handed to content
+  negotiation. `setBody(someString)` under a JSON content type would be re-encoded as a
+  quoted JSON string, so the body hash would describe bytes the server never received.
+- **The key is device-bound and cannot be migrated.** AndroidKeyStore keys are
+  non-extractable and excluded from backup, and Block Store needs Play Services the LPIII
+  does not have. A new handset means a new key and a new profile; the Account screen says so.
+  (iOS differs — there the key rides iCloud Keychain.) The only migration path is key
+  rotation signed by the old device while it still works.
 - **Every player has a display name**, so a game is titled `"blueberry764 vs orange489"`
   (`Game.title`, white first). The server mints it; this tool registers its id once
   (`PlayerIdentityStore.ensureRegistered`) and caches the name in DataStore. Names are read

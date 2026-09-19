@@ -234,6 +234,17 @@ class AccountScreen(sealedActivity: SealedLightActivity) :
                             lighten = true,
                             modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
                         )
+
+                        // Said out loud because it is a one-way door. The signing key lives in
+                        // this phone's hardware keystore and cannot be exported or backed up, so
+                        // a replacement handset starts a new profile. Better here than as a
+                        // support surprise.
+                        LightText(
+                            text = "This name is tied to this phone. A new phone starts fresh.",
+                            variant = LightTextVariant.Detail,
+                            lighten = true,
+                            modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
+                        )
                     }
                 }
             }
