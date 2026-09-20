@@ -120,3 +120,39 @@ data class InviteResponse(
 data class JoinResponse(
     val game: Game,
 )
+
+/** Response to the `/flamingo/players` routes — one player's display name. */
+@Serializable
+data class PlayerName(
+    val playerID: String,
+    val name: String,
+)
+
+/**
+ * Display names keyed for lookup by player id.
+ *
+ * Lower-cased keys, because the ids being looked up come from two places that disagree on case:
+ * this client mints lowercase [java.util.UUID] strings while the server echoes them back
+ * uppercase (the same mismatch [samePlayer] exists for). A map keyed by the raw string would miss
+ * every one of its own entries.
+ */
+fun List<PlayerName>.byPlayerId(): Map<String, String> =
+    associate { it.playerID.lowercase() to it.name }
+
+/**
+ * How a game is titled in the list: `"blueberry764 vs orange489"`, white first.
+ *
+ * White first because that is how a chess game is written, and because it makes both players see
+ * the identical title for the same game rather than each seeing themselves first.
+ *
+ * Each seat degrades on its own. An unfilled seat — the open one on an invite nobody has claimed
+ * yet — reads "open seat"; a seat whose name hasn't arrived falls back to the short form of its
+ * id, so a failed lookup still produces a title of the usual shape rather than a blank row.
+ */
+fun Game.title(names: Map<String, String>): String =
+    "${seatLabel(whitePlayerID, names)} vs ${seatLabel(blackPlayerID, names)}"
+
+private fun seatLabel(playerId: String?, names: Map<String, String>): String {
+    if (playerId == null) return "open seat"
+    return names[playerId.lowercase()] ?: playerId.take(8)
+}
