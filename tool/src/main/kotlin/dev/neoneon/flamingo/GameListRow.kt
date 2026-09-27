@@ -11,7 +11,7 @@ import com.thelightphone.sdk.ui.LightTextVariant
 @Composable
 fun GameListRow(
     game: Game,
-    // This device's player id, so an in-progress game can say whose move it is.
+    // This device's player id, so the row can name the color we hold and say whose move it is.
     playerId: String?,
     // Display names keyed by player id, from `FlamingoApi.fetchPlayerNames`. Empty until they
     // arrive — [Game.title] falls back per seat, so the row draws either way.
@@ -20,13 +20,17 @@ fun GameListRow(
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         LightText(
-            text = game.title(names),
+            text = game.title(playerId, names),
             variant = LightTextVariant.Copy,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         LightText(
-            text = game.statusLabel(playerId),
+            // Status and last activity share the detail line rather than taking one each: this
+            // screen is a list on a small display, and the two read as one thought — "your turn,
+            // 2 hours ago". A game whose timestamp wouldn't parse just shows the status.
+            text = listOfNotNull(game.statusLabel(playerId), game.lastActivity())
+                .joinToString(" · "),
             variant = LightTextVariant.Detail,
             lighten = true,
         )

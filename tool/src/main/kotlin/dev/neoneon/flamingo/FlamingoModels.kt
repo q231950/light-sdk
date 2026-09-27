@@ -140,17 +140,25 @@ fun List<PlayerName>.byPlayerId(): Map<String, String> =
     associate { it.playerID.lowercase() to it.name }
 
 /**
- * How a game is titled in the list: `"blueberry764 vs orange489"`, white first.
+ * How a game is titled in the list: `"White vs orange489"` — the color we hold, then whoever we
+ * are playing.
  *
- * White first because that is how a chess game is written, and because it makes both players see
- * the identical title for the same game rather than each seeing themselves first.
+ * Our own name is the one name on the row that tells the reader nothing, and the color we play is
+ * the one fact the list otherwise never states; in a list of our own games that trade is worth
+ * making. It does mean the two players see different titles for the same game.
+ *
+ * Falls back to `"blueberry764 vs orange489"`, white first, when [playerId] holds neither seat —
+ * there is no "our color" to name then, and white-first is how a chess game is written.
  *
  * Each seat degrades on its own. An unfilled seat — the open one on an invite nobody has claimed
  * yet — reads "open seat"; a seat whose name hasn't arrived falls back to the short form of its
  * id, so a failed lookup still produces a title of the usual shape rather than a blank row.
  */
-fun Game.title(names: Map<String, String>): String =
-    "${seatLabel(whitePlayerID, names)} vs ${seatLabel(blackPlayerID, names)}"
+fun Game.title(playerId: String?, names: Map<String, String>): String = when {
+    samePlayer(playerId, whitePlayerID) -> "White vs ${seatLabel(blackPlayerID, names)}"
+    samePlayer(playerId, blackPlayerID) -> "Black vs ${seatLabel(whitePlayerID, names)}"
+    else -> "${seatLabel(whitePlayerID, names)} vs ${seatLabel(blackPlayerID, names)}"
+}
 
 private fun seatLabel(playerId: String?, names: Map<String, String>): String {
     if (playerId == null) return "open seat"
