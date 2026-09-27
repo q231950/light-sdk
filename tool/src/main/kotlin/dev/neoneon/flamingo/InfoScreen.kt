@@ -39,7 +39,7 @@ enum class LegalDoc(
             "When you play flamingo chess, each move/draw offer/resign action you submit is sent to and stored on our servers. This allows you to later see the games you've played.",
             "Games and their moves are publicly accessible.",
             "Your profile name is public: your opponent sees it, and it appears on every game you play.",
-            "Text you enter that other players can see — your profile name today, anything similar we add later — must not contain your real name or other personal details, impersonate anyone, carry offensive, obscene or hateful language or advertising, or use names and trademarks that aren't yours. We may reset or remove anything that breaks these rules.",
+            "Text you enter that other players can see — for example your profile name — must not contain your real name or other personal details, impersonate anyone, carry offensive, obscene or hateful language or advertising, or use names and trademarks that aren't yours. We may reset or remove anything that breaks these rules.",
             "We can't guarantee persistence for eternity. Though we don't intend to, be aware that games may be deleted at any time without prior notice.",
         ),
     ),
