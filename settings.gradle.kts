@@ -20,7 +20,6 @@ dependencyResolutionManagement {
 rootProject.name = "light-sdk"
 
 includeBuild("plugin")
-include(":chesskit")
 include(":lint-rules")
 include(":sdk:shared")
 include(":sdk:ui")
