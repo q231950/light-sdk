@@ -173,6 +173,12 @@ class GameViewViewModel(
         /** A finished game with more than its opening position is worth stepping through. */
         val canReplay: Boolean get() = outcome != null && frameCount > 1
 
+        /** There is an earlier position to step to. False on the opening position, where PREV would do nothing. */
+        val canStepBack: Boolean get() = canReplay && frameIndex > 0
+
+        /** There is a later position to step to. False on the final position, where NEXT would do nothing. */
+        val canStepForward: Boolean get() = canReplay && frameIndex < frameCount - 1
+
         /** `0` is the opening position; the rest are numbered by the move that produced them. */
         val replayLabel: String get() = if (frameIndex == 0) "Start" else "Move $frameIndex of ${frameCount - 1}"
 
@@ -861,7 +867,7 @@ private fun ColumnScope.GameContent(
         center = when {
             // Once the player steps off the final position the outcome is no longer what the
             // board shows, so the line reports where they are instead of restating the result.
-            outcome != null && state.frameIndex != state.frameCount - 1 ->
+            outcome != null && state.canStepForward ->
                 LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.replayLabel)
             outcome != null -> LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = outcome.label)
             state.promotion is GameViewViewModel.Promotion.Pending ->
@@ -940,12 +946,15 @@ private fun ColumnScope.GameContent(
 
     // A finished game has nothing to decide and no turn to wait for, so the bar the live game
     // never uses is free to step through it. The label sits on the buttons' own row rather than
-    // taking height from the board.
+    // taking height from the board. A button with nowhere to go is left as an empty slot, so the
+    // other one stays where it was.
     if (state.canReplay) {
         LightBottomBar(
             items = listOf(
-                LightBarButton.Text(text = "PREV", onClick = { actions.onStepReplay(false) }),
-                LightBarButton.Text(text = "NEXT", onClick = { actions.onStepReplay(true) }),
+                LightBarButton.Text(text = "PREV", onClick = { actions.onStepReplay(false) })
+                    .takeIf { state.canStepBack },
+                LightBarButton.Text(text = "NEXT", onClick = { actions.onStepReplay(true) })
+                    .takeIf { state.canStepForward },
             ),
         )
     }

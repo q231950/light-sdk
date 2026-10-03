@@ -47,6 +47,34 @@ class ReplayStateTest {
     }
 
     @Test
+    fun theFinalPositionHasNowhereToStepForward() {
+        val last = state(outcome = checkmate, frameIndex = 7, frameCount = 8)
+        assertFalse(last.canStepForward)
+        assertTrue(last.canStepBack)
+    }
+
+    @Test
+    fun theOpeningPositionHasNowhereToStepBack() {
+        val first = state(outcome = checkmate, frameIndex = 0, frameCount = 8)
+        assertFalse(first.canStepBack)
+        assertTrue(first.canStepForward)
+    }
+
+    @Test
+    fun aMiddlePositionCanStepEitherWay() {
+        val middle = state(outcome = checkmate, frameIndex = 3, frameCount = 8)
+        assertTrue(middle.canStepBack)
+        assertTrue(middle.canStepForward)
+    }
+
+    @Test
+    fun withNothingToReplayNeitherDirectionIsOffered() {
+        assertFalse(state(outcome = null, frameIndex = 3, frameCount = 8).canStepBack)
+        assertFalse(state(outcome = null, frameIndex = 3, frameCount = 8).canStepForward)
+        assertFalse(state(outcome = GameOutcome.Resigned(Piece.Color.black), frameCount = 1).canStepForward)
+    }
+
+    @Test
     fun theLabelNamesTheOpeningPositionRatherThanMoveZero() {
         assertEquals("Start", state(outcome = checkmate, frameIndex = 0, frameCount = 8).replayLabel)
     }
