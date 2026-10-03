@@ -2,22 +2,22 @@
 
 This is a fork of Light Phone's `light-sdk` scaffolding. Everything upstream (`sdk/*`,
 `plugin`, `lint-rules`, `builder`, `examples`) is **theirs** — the work that happens here
-is in two modules we own:
+is in the one module we own:
 
 | Module | Ours? | Contents |
 |--------|-------|----------|
-| `:tool` | yes | The `#flamingo chess` Light Phone III tool, package `dev.neoneon.flamingo` |
-| `:chesskit` | yes | A pure-Kotlin/JVM chess engine — board, legality, FEN/SAN/LAN/PGN parsers |
-| `:sdk:*`, `:plugin`, `:lint-rules`, `:builder` | no | Upstream scaffolding; avoid changing |
+| `:tool` | yes | The `#flamingo chess` Light Phone III tool, package `dev.neoneon.flamingo`, plus the chess engine in `dev.neoneon.chesskit` (board, legality, FEN/SAN/LAN/PGN parsers — see `docs/chesskit.md`) |
+| `:sdk:*`, `:plugin`, `:lint-rules`, `:builder` | no | Upstream scaffolding; keep byte-identical to `light/main` |
 
-ALWAYS call the app `#flamingo chess`, especially in user facing copy.
+The project is `#flamingo chess`, but users see the tool as `Chess` — that is its launcher
+`label` in `tool/lighttool.toml`. Keep it `Chess`.
 
 `#flamingo chess` spans three repositories, and a change to the wire contract is a
 three-repo change:
 
 | Repo | What lives there |
 |------|------------------|
-| `q231950/light-sdk` (this one) | The Light Phone III tool and `:chesskit` |
+| `q231950/light-sdk` (this one) | The Light Phone III tool and its chess engine |
 | `q231950/neoneon` | The Vapor backend at `https://neoneon.dev` — `docs/flamingo-api.md` is the contract |
 | `q231950/flamingo` | iOS: iMessage extension, companion app, `FlamingoChessCore` |
 
@@ -30,10 +30,27 @@ scoped `(tool)` — e.g. `feat(tool): highlight the king in check`.
 
 ```bash
 ./gradlew check          # every module must compile and every test must pass
-./gradlew :tool:test     # tool unit tests only
-./gradlew :chesskit:test # engine tests (incl. perft)
+./gradlew :tool:test     # tool unit tests only (engine tests included)
+./gradlew :tool:testDebugUnitTest --tests 'dev.neoneon.chesskit.*' # engine tests (incl. perft)
 ./gradlew :tool:assembleDebug
 ```
+
+### What Light's builder sees
+
+A submission is built by Light's `builder/`, which copies **only** `tool/build.gradle.kts`,
+`tool/lighttool.toml` and `tool/src/main/{kotlin,java,res,assets}/**` into a clean copy of
+upstream `light-sdk` and builds `--offline` against a Gradle cache warmed by upstream's own
+`:tool`. Our `settings.gradle.kts`, version catalog, plugin edits and any extra modules are
+thrown away. So:
+
+- Never make the tool depend on another module, a catalog entry, or a plugin change of ours.
+  A new library must already be in upstream's catalog *and* reachable from `:sdk:client`, or
+  Light has to add it first.
+- `git diff light/main --stat -- . ':!tool' ':!docs' ':!CLAUDE.md'` should stay empty.
+- `serverPackage` is committed as `com.lightos`; flip it to `com.thelightphone.sdk.emulator`
+  locally for the emulator, and don't commit that.
+- The Ktor WebSockets plugin ships in `ktor-client-core`; `ktor-client-websockets` is an empty
+  stub and must not come back.
 
 `compileSdk 36`, `minSdk 34`, JVM target 17 (set in the root `build.gradle.kts`).
 Debug and release both sign with the shared `lightsdk-dev` keystore.
@@ -48,7 +65,8 @@ LightOS deliberately restricts which Android APIs and third-party libraries a to
 use, and `:lint-rules` enforces part of that (`RestrictedApi` is an error in `:tool`).
 Kotlin + Compose + Coroutines + MVVM only. Before reaching for a library, check that it is
 allowed — the safe set is what `:sdk:client` already exposes plus what `tool/build.gradle.kts`
-already declares (Ktor websockets, Room/KSP, lifecycle-viewmodel-compose, Compose icons).
+already declares (Room/KSP, lifecycle-viewmodel-compose). Ktor — WebSockets included — comes
+through `:sdk:client`.
 
 LightOS has no system navigation. Move between screens with `navigateTo` from `LightScreen`;
 the SDK supplies the back button. Screens come in `LightScreen` / `LightViewModel` pairs.
