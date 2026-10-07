@@ -220,19 +220,11 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
 
                     is GamesListViewModel.State.Loaded -> {
                         if (current.games.isEmpty()) {
-                            Box(
+                            EmptyGamesNote(
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxWidth(),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                LightText(
-                                    text = "No games yet.",
-                                    variant = LightTextVariant.Copy,
-                                    align = TextAlign.Center,
-                                    modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp()),
-                                )
-                            }
+                            )
                         } else {
                             LightScrollView(
                                 modifier = Modifier
@@ -297,6 +289,41 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                     ),
                 )
             }
+        }
+    }
+}
+
+// Shown only once the list has loaded and come back empty. It names no buttons: JOIN and
+// the add button drop out when the service closes those paths, and this text stays the same.
+private val emptyGamesParagraphs = listOf(
+    "Chess was invented for two people sitting at one table. Somewhere near you is someone " +
+        "who'd love to beat you at it, or lose to you gracefully. Go find them.",
+    "Set up a real board. Shake a real hand. Watch your opponent's face the moment they spot " +
+        "your knight fork. No screen can deliver that.",
+    "Different cities? Different time zones? Stuck on a very long train ride? That's what " +
+        "this Chess tool is for: a way to keep playing when you can't share a table.",
+    "When you can meet, though, meet. The pieces are lighter in your hand anyway.",
+)
+
+@Composable
+private fun EmptyGamesNote(modifier: Modifier = Modifier) {
+    LightScrollView(
+        modifier = modifier.padding(horizontal = 1f.gridUnitsAsDp()),
+    ) {
+        LightText(
+            text = "Your move — in person.",
+            variant = LightTextVariant.Heading,
+            modifier = Modifier.padding(
+                top = 1f.gridUnitsAsDp(),
+                bottom = 1f.gridUnitsAsDp(),
+            ),
+        )
+        emptyGamesParagraphs.forEach { paragraph ->
+            LightText(
+                text = paragraph,
+                variant = LightTextVariant.Copy,
+                modifier = Modifier.padding(vertical = 0.5f.gridUnitsAsDp()),
+            )
         }
     }
 }
