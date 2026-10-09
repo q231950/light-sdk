@@ -57,8 +57,14 @@ class GamesListViewModel(
             val names: Map<String, String> = emptyMap(),
         ) : State()
         data class Error(val message: String) : State()
-        /** The service is `disabled`: the message is the screen, and there is nothing to list. */
-        data class Unavailable(val message: ServiceStatus.Message) : State()
+        /**
+         * The service is `disabled`: the message is the screen, and there is nothing to list.
+         * [reason] says why — a planned [ServiceStatus.Reason.MAINTENANCE] offers "Check again".
+         */
+        data class Unavailable(
+            val message: ServiceStatus.Message,
+            val reason: ServiceStatus.Reason? = null,
+        ) : State()
     }
 
     private val _state = MutableStateFlow<State>(State.Loading)
@@ -73,18 +79,32 @@ class GamesListViewModel(
         loadGames()
     }
 
+    /**
+     * "Check again" on the maintenance screen: reads the document whatever the cache says, then
+     * loads as usual — so lifting the pause shows the games straight away.
+     */
+    fun checkAgain() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = State.Loading
+            statusService.refresh()
+            loadGames()
+        }
+    }
+
+    private fun showStatus(status: ServiceStatus): Boolean {
+        _status.value = status
+        if (status.level != ServiceStatus.Level.DISABLED) return false
+        _state.value = State.Unavailable(status.message, status.reason)
+        return true
+    }
+
     private fun loadGames() {
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = State.Loading
 
             // The status first: it decides what the rest of the screen may offer, and it is a
             // static file on a CDN, so it lands long before the games list would.
-            val status = statusService.current()
-            _status.value = status
-            if (status.level == ServiceStatus.Level.DISABLED) {
-                _state.value = State.Unavailable(status.message)
-                return@launch
-            }
+            if (showStatus(statusService.current())) return@launch
 
             val playerId = identityStore.getOrCreate()
             // Once per install, and never blocking the list: a game list without names still
@@ -102,7 +122,18 @@ class GamesListViewModel(
                         _state.value = State.Loaded(games, playerId, names)
                     }
                 },
-                onFailure = { error -> _state.value = State.Error(error.message ?: "Unable to load games") },
+                onFailure = { error ->
+                    // A rejection may mean the cord was pulled after this screen read the
+                    // document — a deploy, say. Re-read it, so the player sees the wording
+                    // written for that rather than a bare HTTP error.
+                    if (error is HttpStatusException &&
+                        error.status in ServiceStatus.SERVER_REJECTION_CODES
+                    ) {
+                        val refreshed = statusService.refreshAfterServerRejection()
+                        if (refreshed != null && showStatus(refreshed)) return@fold
+                    }
+                    _state.value = State.Error(error.message ?: "Unable to load games")
+                },
             )
         }
     }
@@ -198,6 +229,20 @@ class GamesListScreen(sealedActivity: SealedLightActivity) :
                                         .fillMaxWidth()
                                         .padding(top = 0.5f.gridUnitsAsDp()),
                                 )
+                                // A planned pause ends on its own, so offer the way back in. An
+                                // emergency has no such promise, and offers nothing.
+                                if (current.reason == ServiceStatus.Reason.MAINTENANCE) {
+                                    LightText(
+                                        text = "CHECK AGAIN",
+                                        variant = LightTextVariant.Copy,
+                                        align = TextAlign.Center,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 1f.gridUnitsAsDp())
+                                            .clickable { viewModel.checkAgain() }
+                                            .padding(vertical = 0.5f.gridUnitsAsDp()),
+                                    )
+                                }
                             }
                         }
                     }
