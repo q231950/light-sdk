@@ -35,6 +35,7 @@ class ServiceStatusTest {
           "clients": {
             "lightPhone": {
               "status": "disabled",
+              "reason": "maintenance",
               "message": { "title": "Resting", "body": "Back soon." }
             }
           },
@@ -47,13 +48,15 @@ class ServiceStatusTest {
         val status = document(sharedFixture).resolve(ServiceStatusDocument.PLATFORM_LIGHT_PHONE)
 
         assertEquals(ServiceStatus.Level.DISABLED, status.level)
+        assertEquals(ServiceStatus.Reason.MAINTENANCE, status.reason)
         // `disabled` is absolute: the top-level `"liveSocket": true` must not leak through it.
         assertEquals(false, status.features.liveSocket)
         assertEquals(false, status.features.newGames)
         assertEquals(false, status.features.invites)
         assertEquals("Resting", status.message.title)
         assertEquals("Back soon.", status.message.body)
-        // Inherited from the top level, which the client block did not restate.
+        // Inherited from the top level, which the client block did not restate. The explicit
+        // recheck beats the shorter `maintenance` default.
         assertEquals(45, status.pollSecondsFloor)
         assertEquals(600, status.recheckAfterSeconds)
     }
@@ -69,12 +72,93 @@ class ServiceStatusTest {
             .resolve(ServiceStatusDocument.PLATFORM_IOS, appVersion = "1.10.0")
 
         assertEquals(ServiceStatus.Level.READ_ONLY, status.level)
+        assertEquals(null, status.reason)
         assertEquals(true, status.features.liveSocket)
         assertEquals(false, status.features.newGames)
         assertEquals(false, status.features.invites)
         assertEquals("#flamingo chess is resting", status.message.title)
         assertEquals("What's going on?", status.message.actionLabel)
         assertEquals("https://neoneon.dev/flamingo/support", status.message.actionUrl)
+    }
+
+    /** The second shared fixture: what `reason` supplies when the document says nothing else. */
+    @Test
+    fun resolvesTheMaintenanceFixture() {
+        val raw = """{ "schema": 1, "status": "disabled", "reason": "maintenance" }"""
+
+        for (platform in listOf(ServiceStatusDocument.PLATFORM_LIGHT_PHONE, ServiceStatusDocument.PLATFORM_IOS)) {
+            val status = document(raw).resolve(platform, appVersion = "1.10.0")
+
+            assertEquals(ServiceStatus.Level.DISABLED, status.level)
+            assertEquals(ServiceStatus.Reason.MAINTENANCE, status.reason)
+            assertEquals(
+                ServiceStatus.Features(liveSocket = false, newGames = false, invites = false),
+                status.features,
+            )
+            assertEquals("#flamingo chess is being updated", status.message.title)
+            assertEquals(ServiceStatus.MAINTENANCE_MESSAGE, status.message)
+            assertEquals(30, status.pollSecondsFloor)
+            assertEquals(60, status.recheckAfterSeconds)
+        }
+    }
+
+    /** `reason` explains `disabled`; at any other level there is nothing to explain. */
+    @Test
+    fun ignoresAReasonBesideAnyOtherLevel() {
+        val status = document("""{ "schema": 1, "status": "readOnly", "reason": "maintenance" }""").resolve()
+
+        assertEquals(ServiceStatus.Level.READ_ONLY, status.level)
+        assertEquals(null, status.reason)
+        assertEquals(ServiceStatus.BUNDLED_MESSAGE, status.message)
+        assertEquals(ServiceStatus.DEFAULT_RECHECK_AFTER_SECONDS, status.recheckAfterSeconds)
+    }
+
+    /** A reason invented after this build shipped is still `disabled`, with the generic copy. */
+    @Test
+    fun readsAnUnknownReasonAsNone() {
+        val status = document("""{ "schema": 1, "status": "disabled", "reason": "somethingNew" }""").resolve()
+
+        assertEquals(ServiceStatus.Level.DISABLED, status.level)
+        assertEquals(null, status.reason)
+        assertEquals(ServiceStatus.BUNDLED_MESSAGE, status.message)
+        assertEquals(ServiceStatus.DEFAULT_RECHECK_AFTER_SECONDS, status.recheckAfterSeconds)
+    }
+
+    /** The document's own wording wins over the bundled maintenance copy. */
+    @Test
+    fun prefersThePublishedMessageDuringMaintenance() {
+        val status = document(
+            """
+            {
+              "schema": 1,
+              "status": "disabled",
+              "reason": "maintenance",
+              "message": { "title": "Back at noon", "body": "Moving house." }
+            }
+            """.trimIndent(),
+        ).resolve()
+
+        assertEquals(ServiceStatus.Reason.MAINTENANCE, status.reason)
+        assertEquals("Back at noon", status.message.title)
+    }
+
+    /** "Update needed" outranks "being updated": the pause ends, the old build stays old. */
+    @Test
+    fun dropsTheReasonForABuildBelowTheMinimum() {
+        val status = document(
+            """
+            {
+              "schema": 1,
+              "status": "disabled",
+              "reason": "maintenance",
+              "minimumVersion": { "lightPhone": "2.0.0" }
+            }
+            """.trimIndent(),
+        ).resolve(appVersion = "1.0.0")
+
+        assertEquals(ServiceStatus.Level.DISABLED, status.level)
+        assertEquals(null, status.reason)
+        assertEquals(ServiceStatusDocument.UPDATE_REQUIRED_MESSAGE, status.message)
     }
 
     @Test

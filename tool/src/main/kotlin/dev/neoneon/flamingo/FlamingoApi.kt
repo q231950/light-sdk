@@ -35,7 +35,12 @@ internal class FlamingoApi(private val keyStore: PlayerKeyStore = PlayerKeyStore
     suspend fun listGames(playerId: String): Result<List<Game>> = runCatching {
         val response = client.get("$BASE_URL/games?playerID=$playerId")
         if (!response.status.isSuccess()) {
-            throw IllegalStateException("HTTP ${response.status.value}: ${response.bodyAsText().take(500)}")
+            // Keeps the status, so the games list can tell a deliberate rejection (and go read
+            // the status document) from an ordinary failure.
+            throw HttpStatusException(
+                response.status.value,
+                "HTTP ${response.status.value}: ${response.bodyAsText().take(500)}",
+            )
         }
         response.body()
     }
@@ -265,6 +270,9 @@ internal class FlamingoApi(private val keyStore: PlayerKeyStore = PlayerKeyStore
 }
 
 private const val LIGHT_PHONE_ORIGIN = "lightPhone"
+
+/** A non-2xx answer, with its status kept for callers that treat some statuses differently. */
+internal class HttpStatusException(val status: Int, message: String) : IllegalStateException(message)
 
 /** Short, top-bar-friendly messages for the invite/join error statuses (see docs/flamingo-api.md). */
 private fun inviteErrorMessage(status: Int): String = when (status) {

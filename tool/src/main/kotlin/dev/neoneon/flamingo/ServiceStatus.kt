@@ -25,6 +25,8 @@ data class ServiceStatus(
     val features: Features,
     val pollSecondsFloor: Int,
     val recheckAfterSeconds: Int,
+    /** Why the service is [Level.DISABLED]. Always null at every other level. */
+    val reason: Reason? = null,
 ) {
     /**
      * How much of the service is open, in escalating order of severity.
@@ -42,6 +44,24 @@ data class ServiceStatus(
         companion object {
             /** An unrecognised level is [OK]: this build has to survive a mode invented later. */
             fun from(wire: String?): Level = entries.firstOrNull { it.wire == wire } ?: OK
+        }
+    }
+
+    /**
+     * Why the service is [Level.DISABLED]. It changes what the player is told, never what the
+     * tool does.
+     *
+     * A field on `disabled` rather than a level of its own because builds that predate it read an
+     * unknown level as [Level.OK], but already honour `disabled` — so a document using it works
+     * on every installation from the first flip.
+     */
+    enum class Reason(val wire: String) {
+        /** A planned pause, e.g. a deploy: "being updated, look again soon". */
+        MAINTENANCE("maintenance");
+
+        companion object {
+            /** An unrecognised reason is no reason: still `disabled`, with the generic copy. */
+            fun from(wire: String?): Reason? = entries.firstOrNull { it.wire == wire }
         }
     }
 
@@ -63,6 +83,19 @@ data class ServiceStatus(
         const val DEFAULT_POLL_SECONDS_FLOOR = 30
         const val DEFAULT_RECHECK_AFTER_SECONDS = 300
 
+        /**
+         * The recheck default during [Reason.MAINTENANCE]: short, so lifting a planned pause
+         * reaches players within about a minute. An explicit `recheckAfterSeconds` still wins.
+         */
+        const val MAINTENANCE_RECHECK_AFTER_SECONDS = 60
+
+        /**
+         * What the origin answers with when it has shed a request on purpose (`503`), or what
+         * Cloudflare answers with while the origin restarts during a deploy (`502`, `521`,
+         * `522`). Each sends the tool back to the status document to find out why.
+         */
+        val SERVER_REJECTION_CODES = setOf(502, 503, 521, 522)
+
         private val POLL_SECONDS_FLOOR_RANGE = 10..600
         private val RECHECK_AFTER_SECONDS_RANGE = 30..3600
 
@@ -73,6 +106,12 @@ data class ServiceStatus(
         val BUNDLED_MESSAGE = Message(
             title = "#flamingo chess is resting",
             body = "The service is busy right now. Your games are safe — try again a little later.",
+        )
+
+        /** Used for [Reason.MAINTENANCE] when the document gave no wording of its own. */
+        val MAINTENANCE_MESSAGE = Message(
+            title = "#flamingo chess is being updated",
+            body = "We're doing some maintenance right now. Your games are safe — have a look again in a few minutes.",
         )
 
         /** Everything open: no document, an unreadable one, or one we do not understand. */
@@ -87,8 +126,10 @@ data class ServiceStatus(
         internal fun clampPollSecondsFloor(value: Int?): Int =
             value?.coerceIn(POLL_SECONDS_FLOOR_RANGE) ?: DEFAULT_POLL_SECONDS_FLOOR
 
-        internal fun clampRecheckAfterSeconds(value: Int?): Int =
-            value?.coerceIn(RECHECK_AFTER_SECONDS_RANGE) ?: DEFAULT_RECHECK_AFTER_SECONDS
+        internal fun clampRecheckAfterSeconds(
+            value: Int?,
+            default: Int = DEFAULT_RECHECK_AFTER_SECONDS,
+        ): Int = value?.coerceIn(RECHECK_AFTER_SECONDS_RANGE) ?: default
     }
 }
 
@@ -105,6 +146,8 @@ data class ServiceStatusDocument(
     val schema: Int,
     /** Kept as the raw string: an unrecognised value is not an error, it is `ok`. */
     val status: String,
+    /** Raw for the same reason: an unrecognised value is no reason, not an error. */
+    val reason: String? = null,
     val message: ServiceStatus.Message? = null,
     val features: PartialFeatures? = null,
     val pollSecondsFloor: Int? = null,
@@ -116,6 +159,7 @@ data class ServiceStatusDocument(
     @Serializable
     data class Override(
         val status: String? = null,
+        val reason: String? = null,
         val message: ServiceStatus.Message? = null,
         val features: PartialFeatures? = null,
         val pollSecondsFloor: Int? = null,
@@ -139,6 +183,8 @@ data class ServiceStatusDocument(
      * 3. `features` derives from the resolved level, then explicit keys apply on top.
      * 4. `disabled` turns everything off and ignores `features` entirely. It is absolute.
      * 5. A build below this platform's `minimumVersion` is `disabled`.
+     * 6. `reason` resolves like `status`, and survives only on `disabled` — and not for a build
+     *    below its minimum version, where "update needed" outranks any other explanation.
      *
      * [appVersion] is null when the caller has no version to offer, and the minimum-version check
      * is then skipped rather than guessed at — see [ServiceStatusService] for why this tool
@@ -150,23 +196,38 @@ data class ServiceStatusDocument(
         var level = ServiceStatus.Level.from(client?.status ?: status)
         var message = client?.message ?: this.message
 
-        if (isBelowMinimumVersion(platform, appVersion)) {
+        val belowMinimum = isBelowMinimumVersion(platform, appVersion)
+        if (belowMinimum) {
             level = ServiceStatus.Level.DISABLED
             // Only reach for the update wording when the document did not supply its own: a
             // document that bothered to write a message meant it for this case too.
             message = message ?: UPDATE_REQUIRED_MESSAGE
         }
 
+        val reason = if (level == ServiceStatus.Level.DISABLED && !belowMinimum) {
+            ServiceStatus.Reason.from(client?.reason ?: this.reason)
+        } else {
+            null
+        }
+        val isMaintenance = reason == ServiceStatus.Reason.MAINTENANCE
+
         return ServiceStatus(
             level = level,
-            message = message ?: ServiceStatus.BUNDLED_MESSAGE,
+            message = message
+                ?: if (isMaintenance) ServiceStatus.MAINTENANCE_MESSAGE else ServiceStatus.BUNDLED_MESSAGE,
             features = resolveFeatures(level, client),
             pollSecondsFloor = ServiceStatus.clampPollSecondsFloor(
                 client?.pollSecondsFloor ?: pollSecondsFloor
             ),
             recheckAfterSeconds = ServiceStatus.clampRecheckAfterSeconds(
-                client?.recheckAfterSeconds ?: recheckAfterSeconds
+                client?.recheckAfterSeconds ?: recheckAfterSeconds,
+                default = if (isMaintenance) {
+                    ServiceStatus.MAINTENANCE_RECHECK_AFTER_SECONDS
+                } else {
+                    ServiceStatus.DEFAULT_RECHECK_AFTER_SECONDS
+                },
             ),
+            reason = reason,
         )
     }
 

@@ -70,6 +70,7 @@ private val statusTitleKey = stringPreferencesKey("FLAMINGO_SERVICE_STATUS_TITLE
 private val statusBodyKey = stringPreferencesKey("FLAMINGO_SERVICE_STATUS_BODY")
 private val statusFetchedAtKey = longPreferencesKey("FLAMINGO_SERVICE_STATUS_FETCHED_AT")
 private val statusRecheckAfterKey = longPreferencesKey("FLAMINGO_SERVICE_STATUS_RECHECK_AFTER")
+private val statusReasonKey = stringPreferencesKey("FLAMINGO_SERVICE_STATUS_REASON")
 
 /**
  * Reads the status document, remembers what it said, and decides when to ask again.
@@ -84,7 +85,7 @@ private val statusRecheckAfterKey = longPreferencesKey("FLAMINGO_SERVICE_STATUS_
  * away. Once that window passes with nothing to read, the restriction lifts rather than
  * stranding an install forever.
  *
- * Only the level and the wording are cached. The feature flags are re-derived from the level, so
+ * Only the level, the reason and the wording are cached. The feature flags are re-derived from the level, so
  * a cache written by an older build cannot resurrect a combination this one does not expect.
  */
 internal class ServiceStatusService(
@@ -118,6 +119,20 @@ internal class ServiceStatusService(
         return status
     }
 
+    /**
+     * Called when the server turns a request away — see [ServiceStatus.SERVER_REJECTION_CODES].
+     *
+     * This is what lets a tool opened *before* the flip still explain itself: the rejection sends
+     * it to the document, and it shows the wording written for the situation instead of a generic
+     * failure. Null when the document was read less than a minute ago, because a screen can
+     * produce several rejections in a breath and they all mean the same thing.
+     */
+    suspend fun refreshAfterServerRejection(): ServiceStatus? {
+        val lastFetch = dataStore.data.first()[statusFetchedAtKey]
+        if (lastFetch != null && now() - lastFetch < SERVER_REJECTION_REFRESH_FLOOR_MILLIS) return null
+        return refresh()
+    }
+
     private suspend fun cache(status: ServiceStatus) {
         dataStore.edit { prefs ->
             prefs[statusLevelKey] = status.level.wire
@@ -125,6 +140,8 @@ internal class ServiceStatusService(
             prefs[statusBodyKey] = status.message.body
             prefs[statusFetchedAtKey] = now()
             prefs[statusRecheckAfterKey] = status.recheckAfterSeconds.toLong()
+            val reason = status.reason
+            if (reason != null) prefs[statusReasonKey] = reason.wire else prefs.remove(statusReasonKey)
         }
     }
 
@@ -144,10 +161,20 @@ internal class ServiceStatusService(
         )
         // Rebuilt from the level rather than stored, so an old cache cannot hand this build a
         // feature combination it was never meant to see.
-        val document = ServiceStatusDocument(schema = 1, status = level.wire, message = message)
+        val document = ServiceStatusDocument(
+            schema = 1,
+            status = level.wire,
+            reason = prefs[statusReasonKey],
+            message = message,
+        )
         return document.resolve(
             platform = ServiceStatusDocument.PLATFORM_LIGHT_PHONE,
             appVersion = null,
         ).copy(recheckAfterSeconds = recheckAfter.toInt())
+    }
+
+    private companion object {
+        /** At most one refetch a minute, however many rejections arrive at once. */
+        const val SERVER_REJECTION_REFRESH_FLOOR_MILLIS = 60_000L
     }
 }
