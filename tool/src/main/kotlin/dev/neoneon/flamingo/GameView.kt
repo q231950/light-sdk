@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -132,6 +133,17 @@ class GameViewViewModel(
         data object ConfirmingResign : Notifications
     }
 
+    /**
+     * Moving a finished game into this seat's archive or back out of it. [Done] sends the screen
+     * back to the list it came from, which the game has now left.
+     */
+    sealed interface ArchiveUpdate {
+        data object Idle : ArchiveUpdate
+        data object Sending : ArchiveUpdate
+        data object Done : ArchiveUpdate
+        data class Failed(val message: String) : ArchiveUpdate
+    }
+
     data class State(
         val position: Position,
         val localColor: Piece.Color,
@@ -165,6 +177,9 @@ class GameViewViewModel(
         // the init block) so a change made on the settings screen reaches a game already on the
         // back stack. Only gates the live board — see shouldShowLiveLastMove.
         val lastMoveVisibility: LastMoveVisibility = LastMoveVisibility.OpponentOnly,
+        // Whether this seat has the game in its archive, from the server's record.
+        val isArchived: Boolean = false,
+        val archiveUpdate: ArchiveUpdate = ArchiveUpdate.Idle,
     ) {
         /** A finished game with more than its opening position is worth stepping through. */
         val canReplay: Boolean get() = outcome != null && frameCount > 1
@@ -195,6 +210,15 @@ class GameViewViewModel(
         val canOfferDraw: Boolean
             get() = hasOpponent && outcome == null && drawOffer is DrawOffer.None &&
                 promotion is Promotion.Hidden && position.sideToMove == localColor
+
+        /**
+         * A finished game we hold a seat in can be archived, or taken back out — once the server
+         * holds it as finished too, which it does for every ending but the draws chesskit finds
+         * on its own (see [isRecordedByServer]).
+         */
+        val canArchive: Boolean
+            get() = !isLoading && outcome?.isRecordedByServer == true &&
+                colorOfPlayer(playerId, whitePlayerId, blackPlayerId) != null
 
         /** Resigning is gated on terminality alone: you may concede on the opponent's clock. */
         val canResign: Boolean
@@ -254,7 +278,13 @@ class GameViewViewModel(
     /** Steps the finished-game board one position back or forward, stopping at either end. */
     fun onStepReplay(forward: Boolean) {
         if (!replay.step(forward)) return
-        _state.update { it.withCurrentBoard() }
+        // A failed archive's message shares the nav bar line that says where the player has
+        // stepped to, so stepping retires it.
+        _state.update { current ->
+            current.withCurrentBoard().let {
+                if (it.archiveUpdate is ArchiveUpdate.Failed) it.copy(archiveUpdate = ArchiveUpdate.Idle) else it
+            }
+        }
     }
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
@@ -300,6 +330,7 @@ class GameViewViewModel(
         var whiteId: String? = _state.value.whitePlayerId
         var blackId: String? = _state.value.blackPlayerId
         var actions = GameActionState(_state.value.drawOffer, agreedDraw)
+        var archived = _state.value.isArchived
         api.fetchGame(gameId).onSuccess { detail ->
             // A draw or resign entry shares the number of the move it precedes, so the number
             // alone doesn't order the log. The ISO-8601 timestamp breaks that tie — an action is
@@ -325,6 +356,7 @@ class GameViewViewModel(
             // black (a black creator, or a not-yet-joined invitee whose seat is still open).
             resolvedColor =
                 if (samePlayer(playerId, detail.game.whitePlayerID)) Piece.Color.white else Piece.Color.black
+            archived = detail.game.isArchivedBy(playerId)
         }.onFailure { error ->
             Log.w(TAG, "No existing state loaded for game $gameId, starting fresh", error)
         }
@@ -335,6 +367,7 @@ class GameViewViewModel(
                 playerId = playerId,
                 whitePlayerId = whiteId,
                 blackPlayerId = blackId,
+                isArchived = archived,
                 drawOffer = actions.drawOffer,
                 // The board was just rebuilt from scratch, so a Pending here would hold a Move
                 // belonging to a Board that no longer exists. The move was never sent — the pawn
@@ -725,6 +758,31 @@ class GameViewViewModel(
         _state.update { it.copy(share = Share.Hidden) }
     }
 
+    /**
+     * Puts the finished game in this seat's archive, or takes it back out. Private to us: the
+     * opponent's lists don't change. No confirmation, since either way is one tap to undo.
+     */
+    fun toggleArchived() {
+        val current = _state.value
+        if (!current.canArchive || current.archiveUpdate is ArchiveUpdate.Sending) return
+        val playerId = current.playerId ?: return
+        val archived = !current.isArchived
+        _state.update { it.copy(archiveUpdate = ArchiveUpdate.Sending) }
+        viewModelScope.launch(Dispatchers.IO) {
+            api.setArchived(gameId, playerId, archived).fold(
+                onSuccess = { game ->
+                    _state.update {
+                        it.copy(isArchived = game.isArchivedBy(playerId), archiveUpdate = ArchiveUpdate.Done)
+                    }
+                },
+                onFailure = { error ->
+                    val message = error.message ?: if (archived) "Couldn't archive" else "Couldn't unarchive"
+                    _state.update { it.copy(archiveUpdate = ArchiveUpdate.Failed(message)) }
+                },
+            )
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         transport.close()
@@ -755,6 +813,12 @@ class GameView(
         val themeColors by LightThemeController.colors.collectAsState()
         val state by viewModel.state.collectAsState()
 
+        // Archiving moves the game to the other list, so the one behind this screen is where the
+        // player sees it worked — and it reloads on the way back.
+        LaunchedEffect(state.archiveUpdate) {
+            if (state.archiveUpdate is GameViewViewModel.ArchiveUpdate.Done) goBack()
+        }
+
         GameScreen(
             state = state,
             colors = themeColors,
@@ -773,6 +837,7 @@ class GameView(
                 onCancelResign = { viewModel.cancelResign() },
                 onConfirmResign = { viewModel.confirmResign() },
                 onStepReplay = { viewModel.onStepReplay(it) },
+                onToggleArchived = { viewModel.toggleArchived() },
             ),
         )
     }
@@ -797,6 +862,7 @@ private data class GameActions(
     val onCancelResign: () -> Unit = {},
     val onConfirmResign: () -> Unit = {},
     val onStepReplay: (Boolean) -> Unit = {},
+    val onToggleArchived: () -> Unit = {},
 )
 
 // The whole screen, driven only by [state] and callbacks so every state it can be in — a pending
@@ -861,6 +927,8 @@ private fun ColumnScope.GameContent(
         // chesskit flips the side to move the instant the pawn lands, so the bar would read
         // "Waiting for opponent…" while it is really waiting for you.
         center = when {
+            outcome != null && state.archiveUpdate is GameViewViewModel.ArchiveUpdate.Failed ->
+                LightTopBarCenter.TwoLineDetail(line1 = "Game", line2 = state.archiveUpdate.message)
             // Once the player steps off the final position the outcome is no longer what the
             // board shows, so the line reports where they are instead of restating the result.
             outcome != null && state.canStepForward ->
@@ -941,14 +1009,19 @@ private fun ColumnScope.GameContent(
     }
 
     // A finished game has nothing to decide and no turn to wait for, so the bar the live game
-    // never uses is free to step through it. The label sits on the buttons' own row rather than
-    // taking height from the board. A button with nowhere to go is left as an empty slot, so the
-    // other one stays where it was.
-    if (state.canReplay) {
+    // never uses is free to step through it, with archiving between the two steps. The label sits
+    // on the buttons' own row rather than taking height from the board. A button with nowhere to
+    // go is left as an empty slot, so the others stay where they were.
+    val archiveButton = LightBarButton.Text(
+        text = if (state.isArchived) "UNARCHIVE" else "ARCHIVE",
+        onClick = actions.onToggleArchived,
+    ).takeIf { state.canArchive }
+    if (state.canReplay || archiveButton != null) {
         LightBottomBar(
             items = listOf(
                 LightBarButton.Text(text = "PREV", onClick = { actions.onStepReplay(false) })
                     .takeIf { state.canStepBack },
+                archiveButton,
                 LightBarButton.Text(text = "NEXT", onClick = { actions.onStepReplay(true) })
                     .takeIf { state.canStepForward },
             ),
@@ -1129,6 +1202,9 @@ private fun matedState(): GameViewViewModel.State {
         position = board.position,
         localColor = Piece.Color.white,
         isLoading = false,
+        playerId = "us",
+        whitePlayerId = "us",
+        blackPlayerId = "them",
         checkedKingSquare = checkedKingSquare(board.state, board.position),
         lastMove = last!!.let { it.start to it.end },
         outcome = gameOutcome(board.state, resignedColor = null),
@@ -1249,6 +1325,15 @@ private fun PreviewGameViewCheckmated(
     @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
 ) {
     GameScreen(state = matedState(), colors = colors)
+}
+
+// The same game opened from the archive: the bar's middle button takes it back out.
+@Preview(widthDp = 1080 / 3, heightDp = 1240 / 3, showBackground = true)
+@Composable
+private fun PreviewGameViewCheckmatedArchived(
+    @PreviewParameter(LightColorsPreviewProvider::class) colors: LightColors,
+) {
+    GameScreen(state = matedState().copy(isArchived = true), colors = colors)
 }
 
 // The same presentation for a game someone resigned, where the board itself gives nothing away.
